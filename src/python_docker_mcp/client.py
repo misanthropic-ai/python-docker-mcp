@@ -1,66 +1,34 @@
 """Client module for interacting with the python-docker-mcp server."""
 
 import asyncio
-import os
 import re
-import sys
-from contextlib import AsyncExitStack
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Any, Tuple
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import mcp.types as types
+from mcp import ClientSession
 
 
 class PythonDockerClient:
     """Client for interacting with the Python Docker MCP server."""
 
-    def __init__(self) -> None:
-        """Initialize the client."""
-        self.session: Optional[ClientSession] = None
-        self.exit_stack = AsyncExitStack()
-
-    async def connect_to_server(self, server_script_path: Optional[str] = None) -> None:
-        """Connect to the MCP server.
-
+    def __init__(self, mcp_client=None):
+        """Initialize the client.
+        
         Args:
-            server_script_path: Optional path to the server script
-                                If None, uses module name directly
+            mcp_client: Optional MCP client instance to use. If None, the caller must handle
+                        client initialization separately.
         """
-        server_env = os.environ.copy()
+        self._mcp_client = mcp_client
 
-        if server_script_path:
-            is_python = server_script_path.endswith(".py")
-            is_js = server_script_path.endswith(".js")
-            if not (is_python or is_js):
-                raise ValueError("Server script must be a .py or .js file")
+    async def list_tools(self) -> List[types.Tool]:
+        """List available tools on the server.
+        
+        Returns:
+            List of available tools
+        """
+        return await self._mcp_client.list_tools()
 
-            command = "python" if is_python else "node"
-            server_params = StdioServerParameters(command=command, args=[server_script_path], env=server_env)
-        else:
-            # Use the module directly
-            server_params = StdioServerParameters(command=sys.executable, args=["-m", "python_docker_mcp"], env=server_env)
-
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        read_stream, write_stream = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-        await self.session.initialize()
-
-    async def list_tools(self) -> List[Dict[str, Any]]:
-        """List available tools on the server."""
-        self._ensure_connected()
-
-        response = await self.session.list_tools()
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.inputSchema,
-            }
-            for tool in response.tools
-        ]
-
-    async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> str:
         """Execute code in a transient container.
 
         Args:
@@ -68,42 +36,17 @@ class PythonDockerClient:
             state: Optional state to provide to the execution environment
 
         Returns:
-            Dictionary containing execution results and state
+            Formatted execution result as a string
         """
-        self._ensure_connected()
+        if state is None:
+            state = {}
 
-        args = {"code": code}
-        if state:
-            args["state"] = state
+        response = await self._mcp_client.call_tool("execute-transient", {"code": code, "state": state})
+        if response and len(response) > 0 and hasattr(response[0], "text"):
+            return response[0].text
+        return "No execution result returned"
 
-        response = await self.session.call_tool("execute-transient", args)
-        result_text = response.content[0].text
-
-        # Parse the result to extract state information
-        result = {"raw_output": result_text}
-
-        # Check for error
-        error_match = re.search(r"Error: (.+)$", result_text, re.MULTILINE)
-        if error_match:
-            result["error"] = error_match.group(1)
-        else:
-            result["error"] = None
-
-        # Extract stdout
-        # This is a simplified approach - in a real implementation, you might need
-        # more sophisticated parsing based on the format of your output
-        execution_start = result_text.find("Execution Result:")
-        if execution_start >= 0:
-            output_text = result_text[execution_start + len("Execution Result:") :].strip()
-            if result["error"]:
-                error_start = output_text.find("Error:")
-                if error_start >= 0:
-                    output_text = output_text[:error_start].strip()
-            result["output"] = output_text
-
-        return result
-
-    async def execute_persistent(self, code: str, session_id: Optional[str] = None) -> Tuple[Dict[str, Any], str]:
+    async def execute_persistent(self, code: str, session_id: Optional[str] = None) -> str:
         """Execute code in a persistent container.
 
         Args:
@@ -111,47 +54,18 @@ class PythonDockerClient:
             session_id: Optional session ID to use (creates new if None)
 
         Returns:
-            Tuple of (execution_results, session_id)
+            Formatted execution result as a string with session ID information
         """
-        self._ensure_connected()
-
         args = {"code": code}
         if session_id:
             args["session_id"] = session_id
 
-        response = await self.session.call_tool("execute-persistent", args)
-        result_text = response.content[0].text
+        response = await self._mcp_client.call_tool("execute-persistent", args)
+        if response and len(response) > 0 and hasattr(response[0], "text"):
+            return response[0].text
+        return "No execution result returned"
 
-        # Extract session ID
-        session_match = re.search(r"Session ID: ([a-f0-9-]+)", result_text)
-        current_session_id = session_match.group(1) if session_match else session_id
-
-        # Parse the result
-        result = {"raw_output": result_text}
-
-        # Check for error
-        error_match = re.search(r"Error: (.+)$", result_text, re.MULTILINE)
-        if error_match:
-            result["error"] = error_match.group(1)
-        else:
-            result["error"] = None
-
-        # Extract stdout
-        execution_start = result_text.find("Execution Result:")
-        if execution_start >= 0:
-            output_text = result_text[execution_start + len("Execution Result:") :].strip()
-            if result["error"]:
-                error_start = output_text.find("Error:")
-                if error_start >= 0:
-                    output_text = output_text[:error_start].strip()
-            result["output"] = output_text
-
-        if current_session_id is None:
-            raise RuntimeError("Failed to extract session ID from response")
-
-        return result, current_session_id
-
-    async def install_package(self, package_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+    async def install_package(self, package_name: str, session_id: Optional[str] = None) -> str:
         """Install a Python package in a container.
 
         Args:
@@ -159,88 +73,95 @@ class PythonDockerClient:
             session_id: Optional session ID for installing in a persistent environment
 
         Returns:
-            Dictionary containing installation results
+            Installation result as a string
         """
-        self._ensure_connected()
-
         args = {"package_name": package_name}
         if session_id:
             args["session_id"] = session_id
 
-        response = await self.session.call_tool("install-package", args)
-        result_text = response.content[0].text
+        response = await self._mcp_client.call_tool("install-package", args)
+        if response and len(response) > 0 and hasattr(response[0], "text"):
+            return response[0].text
+        return "No installation result returned"
 
-        # Parse the result
-        result = {"raw_output": result_text, "package_name": package_name}
-
-        # Check if installation was successful
-        if "Successfully installed" in result_text:
-            result["success"] = True
-        else:
-            result["success"] = False
-
-        return result
-
-    async def cleanup_session(self, session_id: str) -> bool:
+    async def cleanup_session(self, session_id: str) -> str:
         """Clean up a persistent session.
 
         Args:
             session_id: Session ID to clean up
 
         Returns:
-            True if cleanup was successful
+            Cleanup result as a string
         """
-        self._ensure_connected()
+        response = await self._mcp_client.call_tool("cleanup-session", {"session_id": session_id})
+        if response and len(response) > 0 and hasattr(response[0], "text"):
+            return response[0].text
+        return "No cleanup result returned"
 
-        args = {"session_id": session_id}
-        response = await self.session.call_tool("cleanup-session", args)
-        result_text = response.content[0].text
+    def _extract_session_id(self, text: str) -> Optional[str]:
+        """Extract session ID from response text.
+        
+        Args:
+            text: Response text to parse
+            
+        Returns:
+            Session ID if found, None otherwise
+        """
+        session_match = re.search(r"Session ID: ([a-f0-9-]+)", text)
+        return session_match.group(1) if session_match else None
 
-        return "cleaned up successfully" in result_text
-
-    async def close(self) -> None:
-        """Close the connection to the server."""
-        await self.exit_stack.aclose()
-        self.session = None
-
-    def _ensure_connected(self) -> None:
-        """Ensure that the client is connected to the server."""
-        if not self.session:
-            raise RuntimeError("Not connected to server. Call connect_to_server() first.")
+    async def execute_code_blocks(self, code_blocks: List[str], shared_state: bool = False, persistent: bool = False) -> List[str]:
+        """Execute multiple code blocks in sequence.
+        
+        Args:
+            code_blocks: List of code blocks to execute
+            shared_state: If True, state is shared between transient executions
+            persistent: If True, code blocks are executed in a persistent session
+            
+        Returns:
+            List of execution results
+        """
+        results = []
+        state = {}
+        session_id = None
+        
+        for code in code_blocks:
+            if persistent:
+                result = await self.execute_persistent(code, session_id)
+                if not session_id:
+                    # Extract the session ID from the first execution result
+                    session_id = self._extract_session_id(result)
+                    if not session_id:
+                        raise ValueError("Failed to extract session ID from persistent execution result")
+                results.append(result)
+            elif shared_state:
+                result = await self.execute_transient(code, state)
+                results.append(result)
+                # We'd need to parse the state back from the result in a real implementation
+            else:
+                result = await self.execute_transient(code)
+                results.append(result)
+        
+        return results
 
 
 async def main() -> None:
     """Run a simple demo of the client."""
-    client = PythonDockerClient()
-
+    # For a real example, we'd need to set up a client session first
     try:
-        print("Connecting to MCP server...")
-        await client.connect_to_server()
-
-        print("Listing tools...")
-        tools = await client.list_tools()
-        for tool in tools:
-            print(f"- {tool['name']}: {tool['description']}")
-
-        print("\nExecuting transient code...")
-        result = await client.execute_transient("x = 42\nprint(f'The answer is {x}')")
-        print(f"Result: {result}")
-
-        print("\nExecuting persistent code...")
-        result, session_id = await client.execute_persistent("y = 84\nprint(f'Twice the answer is {y}')")
-        print(f"Result: {result}")
-        print(f"Session ID: {session_id}")
-
-        print("\nExecuting more code in the same session...")
-        result2, _ = await client.execute_persistent("z = y / 2\nprint(f'Back to the answer: {z}')", session_id)
-        print(f"Result: {result2}")
-
-        print("\nCleaning up session...")
-        success = await client.cleanup_session(session_id)
-        print(f"Cleanup successful: {success}")
-
-    finally:
-        await client.close()
+        print("This is just a demo script showing API usage.")
+        print("To use this as a real client, you need to:")
+        print("1. Create a ClientSession and connect to a server")
+        print("2. Pass the session to PythonDockerClient")
+        print("3. Use the client methods to interact with the server")
+        
+        print("\nExample usage would look like:")
+        print("client = PythonDockerClient(session)")
+        print("tools = await client.list_tools()")
+        print("result = await client.execute_transient('print(\"Hello, world!\")')")
+        
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":

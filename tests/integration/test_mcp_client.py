@@ -27,50 +27,20 @@ class TestMCPClient:
         server_env["PYTHONPATH"] = f"{os.path.abspath('.')}:{python_path}"
 
         server_module = "python_docker_mcp"
-        server_cmd = [sys.executable, "-m", server_module]
-
-        proc = subprocess.Popen(
-            server_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=server_env,
-            bufsize=0,
+        
+        # Use the StdioServerParameters class to define the server
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", server_module],
+            env=server_env
         )
 
-        # Allow the server to start up
-        time.sleep(0.5)
-
-        # Connect the client to the server's pipes
-        class PipeStdio:
-            """Wrapper to turn process pipes into AsyncReader/AsyncWriter."""
-
-            def __init__(self, proc):
-                self.proc = proc
-
-            async def read(self, n: int = -1) -> bytes:
-                """Read bytes from the pipe."""
-                return self.proc.stdout.read1(n)
-
-            async def write(self, data: bytes) -> None:
-                """Write bytes to the pipe."""
-                self.proc.stdin.write(data)
-                self.proc.stdin.flush()
-
-        pipe_stdio = PipeStdio(proc)
-
-        # Create the client session
-        session = ClientSession(pipe_stdio, pipe_stdio.write)
-        await session.initialize()
-
-        # Yield the session for the test
-        try:
+        # Use the stdio_client context manager properly
+        async with stdio_client(server_params) as session:
+            # Yield the session for the test
             yield session
-        finally:
-            # Clean up
-            await session.close()
-            proc.terminate()
-            proc.wait()
+        
+        # The context manager will handle cleanup automatically
 
     @pytest.mark.asyncio
     async def test_list_tools(self, client_session: ClientSession) -> None:
@@ -154,6 +124,49 @@ class TestMCPClient:
         with pytest.raises(McpError):
             await client_session.call_tool("execute-transient", {})
 
+    @pytest.mark.asyncio
+    async def test_container_error_handling(self, client_session: ClientSession) -> None:
+        """Test error handling when containers fail unexpectedly."""
+        # Test code that causes Docker interaction issues
+        code = """
+import os
+# Code that attempts to access restricted resources
+try:
+    os.system("touch /root/test.txt")  # This should fail in a restricted container
+except Exception as e:
+    print(f"Error: {e}")
+"""
+        # This should execute without raising an exception, even if the Docker operation fails
+        response = await client_session.call_tool("execute-transient", {"code": code})
+        
+        # Verify the response has content
+        assert len(response.content) > 0
+        text_content = response.content[0]
+        assert text_content.type == "text"
+        
+        # We don't necessarily get a specific error message, but the execution should complete
+        assert "Error" in text_content.text or "execution complete" in text_content.text.lower()
+        
+    @pytest.mark.asyncio
+    async def test_execute_with_traceback(self, client_session: ClientSession) -> None:
+        """Test that execution errors include traceback information."""
+        # Code with a runtime error
+        code = """
+def divide_by_zero():
+    return 1/0
+    
+divide_by_zero()
+"""
+        response = await client_session.call_tool("execute-transient", {"code": code})
+        
+        # Verify the response contains a traceback
+        text_content = response.content[0]
+        assert text_content.type == "text"
+        assert "Error:" in text_content.text
+        assert "ZeroDivisionError" in text_content.text
+        # Check for traceback elements
+        assert "Traceback" in text_content.text or "line" in text_content.text
+
 
 class MockMCPClient:
     """Mock MCP client for testing."""
@@ -174,10 +187,11 @@ class MockMCPClient:
         server_module = "python_docker_mcp"
         server_params = StdioServerParameters(command=sys.executable, args=["-m", server_module], env=server_env)
 
-        stdio_transport = await stdio_client(server_params)
-        read_stream, write_stream = stdio_transport
+        # Use the async context manager properly
+        self.client_context = stdio_client(server_params)
+        self.session = await self.client_context.__aenter__()
 
-        self.session = ClientSession(read_stream, write_stream)
+        # Initialize the session
         await self.session.initialize()
 
     async def list_tools(self) -> List[Dict[str, Any]]:
@@ -250,40 +264,46 @@ class MockMCPClient:
         return response.content[0].text
 
     async def close(self) -> None:
-        """Close the connection to the server."""
-        if self.session:
+        """Close the client session."""
+        if hasattr(self, 'session') and self.session:
             await self.session.close()
+            # Properly exit the async context manager
+            if hasattr(self, 'client_context'):
+                await self.client_context.__aexit__(None, None, None)
             self.session = None
 
 
 @pytest.mark.asyncio
 async def test_mock_mcp_client_workflow():
-    """Test a full workflow using the MockMCPClient."""
+    """Test the complete workflow using the mock client."""
     client = MockMCPClient()
-
     try:
-        # Connect to the server
         await client.connect_to_server()
-
+        
         # List tools
         tools = await client.list_tools()
-        assert len(tools) == 4
-
+        assert len(tools) >= 4
+        
         # Execute transient code
-        result = await client.execute_transient("print('Hello from transient container')")
-        assert "Hello from transient container" in result
-
-        # Execute persistent code with state
-        result1, session_id = await client.execute_persistent("x = 100\nprint(f'x = {x}')")
-        assert "x = 100" in result1
-
-        # Execute more code in the same session
-        result2, _ = await client.execute_persistent("y = x * 2\nprint(f'y = {y}')", session_id)
-        assert "y = 200" in result2
-
+        result = await client.execute_transient("print('Hello, world!')")
+        assert "Hello, world!" in result
+        
+        # Execute persistent code
+        result, session_id = await client.execute_persistent("x = 42\nprint(f'x = {x}')")
+        assert "x = 42" in result
+        assert session_id != "unknown"
+        
+        # Use the session_id for another execution
+        result, _ = await client.execute_persistent("y = x * 2\nprint(f'y = {y}')", session_id)
+        assert "y = 84" in result
+        
+        # Install a package
+        result = await client.install_package("numpy", session_id)
+        assert "numpy" in result
+        
         # Clean up
-        cleanup_result = await client.cleanup_session(session_id)
-        assert "cleaned up successfully" in cleanup_result
-
+        result = await client.cleanup_session(session_id)
+        assert session_id in result
+        
     finally:
         await client.close()

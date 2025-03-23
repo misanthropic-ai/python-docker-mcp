@@ -197,6 +197,10 @@ class MockServerProcess:
     def terminate(self):
         """Terminate the mock server."""
         self.returncode = 0
+        
+    def kill(self):
+        """Kill the mock server process."""
+        self.returncode = -9  # Typical exit code for a killed process
 
 
 @pytest.fixture
@@ -247,12 +251,30 @@ async def test_full_client_workflow(mock_subprocess_popen, mock_server):
     result = await client.install_package("numpy", session_id)
     assert result["package_name"] == "numpy"
     assert result["success"] is True
+    
+    # Test cleanup session
+    result = await client.cleanup_session(session_id)
+    assert result["session_id"] == "test-session-123"
+    assert result["success"] is True
+    
+    # Test executing code with errors
+    error_code = "print('Starting...'); undefined_variable; print('This won\\'t run')"
+    result = await client.execute_transient(error_code)
+    assert "Starting..." in result["output"]
+    assert "NameError" in result["error"]
+    assert "undefined_variable" in result["error"]
+    
+    # Test executing code with syntax error
+    syntax_error_code = "print('Starting...'); if True print('No colon'); print('This won\\'t run')"
+    result = await client.execute_transient(syntax_error_code)
+    assert "SyntaxError" in result["error"]
+    
+    # Test execution with None state
+    result = await client.execute_transient("x = 42", None)
+    assert result["output"] is not None
+    assert result["error"] is None
 
-    # Test cleaning up a session
-    success = await client.cleanup_session(session_id)
-    assert success is True
-
-    # Test closing the connection
+    # Close the client
     await client.close()
     assert client.session is None
 
@@ -301,6 +323,14 @@ async def test_invalid_response_handling():
     class InvalidResponseServer(MockServerProcess):
         async def mock_readline(self):
             return b"invalid json\n"
+            
+        def terminate(self):
+            """Terminate the mock server."""
+            self.returncode = 0
+            
+        def kill(self):
+            """Kill the mock server process."""
+            self.returncode = -9  # Typical exit code for a killed process
 
     invalid_server = InvalidResponseServer()
     invalid_server.stdout.readline = invalid_server.mock_readline
