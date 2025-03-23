@@ -1,0 +1,53 @@
+[project]
+name = "python-docker-mcp"
+version = "0.1.0"
+description = "Dockerised Python execution environment"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+ "docker>=7.1.0",
+ "mcp>=1.5.0",
+ "pyyaml>=6.0.2",
+]
+[[project.authors]]
+name = "Shannon Sands"
+email = "shannon.sands.1979@gmail.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+python-docker-mcp = "python_docker_mcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/python_docker_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/python_docker_mcp/*.py",
+    "src/python_docker_mcp/*.yaml",
+    "README.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*"]
+addopts = "--cov=src/python_docker_mcp --cov-report=term --cov-report=xml --cov-report=html"
+
+[tool.coverage.run]
+source = ["src/python_docker_mcp"]
+omit = ["*/tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise ImportError",
+]
+fail_under = 80

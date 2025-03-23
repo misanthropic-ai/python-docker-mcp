@@ -1,0 +1,64 @@
+# Default configuration for python-docker-mcp
+
+docker:
+  # Docker image to use for execution environments
+  image: python:3.12.2-slim
+  
+  # Working directory inside the container
+  working_dir: /app
+  
+  # Resource limits
+  memory_limit: 256m
+  cpu_limit: 0.5
+  timeout: 30  # seconds
+  
+  # Security settings
+  network_disabled: true
+  read_only: true
+
+package:
+  # Package installer to use (uv or pip)
+  installer: uv
+  
+  # Optional PyPI mirror configuration
+  index_url: null
+  trusted_hosts: []
+
+# Modules that are allowed to be imported
+allowed_modules:
+  - math
+  - datetime
+  - random
+  - json
+  - re
+  - collections
+  - statistics
+  - itertools
+  - functools
+  - operator
+  - string
+  - typing
+  - dataclasses
+  - enum
+  - abc
+  - array
+  - bisect
+  - heapq
+  - decimal
+  - fractions
+  - numbers
+
+# Modules that are blocked from being imported
+blocked_modules:
+  - os
+  - sys
+  - subprocess
+  - multiprocessing
+  - threading
+  - socket
+  - asyncio
+  - shutil
+  - pathlib
+  - tempfile
+  - pty
+  - platform 
