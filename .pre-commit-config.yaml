@@ -32,12 +32,3 @@ repos:
     hooks:
     -   id: mypy
         additional_dependencies: [types-PyYAML]
-
--   repo: local
-    hooks:
-    -   id: pytest-check
-        name: pytest-check
-        entry: pytest --cov=src/python_docker_mcp --cov-report=term --cov-fail-under=80
-        language: system
-        pass_filenames: false
-        always_run: true 

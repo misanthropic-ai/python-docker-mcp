@@ -6,11 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from python_docker_mcp.build_docker_image import (
-    build_docker_image,
-    get_dockerfile_path,
-    main,
-)
+from python_docker_mcp.build_docker_image import build_docker_image, get_dockerfile_path, main
 
 
 def test_get_dockerfile_path():
@@ -42,14 +38,14 @@ def test_build_docker_image_success(mock_exists, mock_run):
         stdout="Successfully built test-image",
         stderr="",
     )
-    
+
     # Test function
     result = build_docker_image("test-image:latest", "/path/to/Dockerfile")
-    
+
     # Verify results
     assert result is True
     mock_run.assert_called_once()
-    
+
     # Verify Docker build command
     cmd = mock_run.call_args[0][0]
     assert "docker" in cmd
@@ -69,15 +65,15 @@ def test_build_docker_image_with_build_args(mock_exists, mock_run):
         stdout="Successfully built test-image",
         stderr="",
     )
-    
+
     # Test function with build args
     build_args = {"PYTHON_VERSION": "3.12", "INSTALL_DEV": "true"}
     result = build_docker_image("test-image:latest", "/path/to/Dockerfile", build_args)
-    
+
     # Verify results
     assert result is True
     mock_run.assert_called_once()
-    
+
     # Verify build args were passed
     cmd = mock_run.call_args[0][0]
     assert "--build-arg" in cmd
@@ -92,10 +88,10 @@ def test_build_docker_image_failure(mock_exists, mock_run):
     """Test Docker image build failure."""
     # Setup mock
     mock_run.side_effect = Exception("Build failed")
-    
+
     # Test function
     result = build_docker_image("test-image:latest", "/path/to/Dockerfile")
-    
+
     # Verify results
     assert result is False
 
@@ -105,7 +101,7 @@ def test_build_docker_image_missing_dockerfile(mock_exists):
     """Test Docker image build with missing Dockerfile."""
     # Test function
     result = build_docker_image("test-image:latest", "/path/to/nonexistent/Dockerfile")
-    
+
     # Verify results
     assert result is False
 
@@ -115,11 +111,11 @@ def test_main_success(mock_build):
     """Test main function success."""
     # Setup mock
     mock_build.return_value = True
-    
+
     # Test function with args
     with patch("sys.argv", ["build_docker_image.py", "--tag", "test-image:latest"]):
         exit_code = main()
-    
+
     # Verify results
     assert exit_code == 0
     mock_build.assert_called_once_with("test-image:latest", None, {})
@@ -132,11 +128,11 @@ def test_main_with_custom_dockerfile(mock_build):
     with tempfile.NamedTemporaryFile(suffix=".Dockerfile") as f:
         # Setup mock
         mock_build.return_value = True
-        
+
         # Test function with custom Dockerfile
         with patch("sys.argv", ["build_docker_image.py", "--dockerfile", f.name]):
             exit_code = main()
-        
+
         # Verify results
         assert exit_code == 0
         mock_build.assert_called_once_with("python-docker-mcp:latest", f.name, {})
@@ -147,22 +143,23 @@ def test_main_with_build_args(mock_build):
     """Test main function with build args."""
     # Setup mock
     mock_build.return_value = True
-    
+
     # Test function with build args
-    with patch("sys.argv", [
-        "build_docker_image.py",
-        "--build-arg", "PYTHON_VERSION=3.12",
-        "--build-arg", "DEBUG=true"
-    ]):
+    with patch(
+        "sys.argv",
+        [
+            "build_docker_image.py",
+            "--build-arg",
+            "PYTHON_VERSION=3.12",
+            "--build-arg",
+            "DEBUG=true",
+        ],
+    ):
         exit_code = main()
-    
+
     # Verify results
     assert exit_code == 0
-    mock_build.assert_called_once_with(
-        "python-docker-mcp:latest",
-        None,
-        {"PYTHON_VERSION": "3.12", "DEBUG": "true"}
-    )
+    mock_build.assert_called_once_with("python-docker-mcp:latest", None, {"PYTHON_VERSION": "3.12", "DEBUG": "true"})
 
 
 @patch("python_docker_mcp.build_docker_image.build_docker_image")
@@ -170,10 +167,10 @@ def test_main_failure(mock_build):
     """Test main function failure."""
     # Setup mock
     mock_build.return_value = False
-    
+
     # Test function
     with patch("sys.argv", ["build_docker_image.py"]):
         exit_code = main()
-    
+
     # Verify results
-    assert exit_code == 1 
+    assert exit_code == 1

@@ -25,4 +25,4 @@ RUN useradd -m -u 1000 appuser
 USER appuser
 
 # Default command (will be overridden when running the container)
-CMD ["python", "-c", "import time; time.sleep(86400)"] 
+CMD ["python", "-c", "import time; time.sleep(86400)"]

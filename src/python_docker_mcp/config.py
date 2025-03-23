@@ -1,12 +1,17 @@
+"""Configuration module for the Python Docker MCP server."""
+
 import os
-import yaml
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional, cast
+
 import pkg_resources
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal
+import yaml
+
 
 @dataclass
 class DockerConfig:
     """Configuration for the Docker execution environment."""
+
     image: str = "python:3.12.2-slim"
     working_dir: str = "/app"
     memory_limit: str = "256m"
@@ -14,61 +19,76 @@ class DockerConfig:
     timeout: int = 30  # seconds
     network_disabled: bool = True
     read_only: bool = True
-    
+
+
 @dataclass
 class PackageConfig:
     """Configuration for package management."""
+
     installer: Literal["uv", "pip"] = "uv"
     index_url: Optional[str] = None
-    trusted_hosts: List[str] = None
-    
-    def __post_init__(self):
-        if self.trusted_hosts is None:
-            self.trusted_hosts = []
+    trusted_hosts: List[str] = field(default_factory=list)
+
 
 @dataclass
 class Configuration:
     """Main configuration for the Python Docker MCP server."""
-    docker: DockerConfig = DockerConfig()
-    package: PackageConfig = PackageConfig()
-    allowed_modules: List[str] = None
-    blocked_modules: List[str] = None
-    
-    def __post_init__(self):
-        if self.allowed_modules is None:
-            # Default safe modules
-            self.allowed_modules = ["math", "datetime", "random", "json", "re", "collections"]
-        
-        if self.blocked_modules is None:
-            # Default unsafe modules
-            self.blocked_modules = ["os", "sys", "subprocess", "shutil", "pathlib"]
 
-def get_default_config() -> Dict:
-    """Load the default configuration from the embedded YAML file."""
+    docker: DockerConfig = field(default_factory=DockerConfig)
+    package: PackageConfig = field(default_factory=PackageConfig)
+    allowed_modules: List[str] = field(
+        default_factory=lambda: [
+            "math",
+            "datetime",
+            "random",
+            "json",
+            "re",
+            "collections",
+        ]
+    )
+    blocked_modules: List[str] = field(default_factory=lambda: ["os", "sys", "subprocess", "shutil", "pathlib"])
+
+
+def get_default_config() -> Dict[str, Any]:
+    """Load the default configuration from the embedded YAML file.
+
+    Returns:
+        Dictionary containing the default configuration values
+    """
     try:
-        default_config_path = pkg_resources.resource_filename('python_docker_mcp', 'default_config.yaml')
-        with open(default_config_path, 'r') as f:
-            return yaml.safe_load(f)
+        default_config_path = pkg_resources.resource_filename("python_docker_mcp", "default_config.yaml")
+        with open(default_config_path, "r") as f:
+            config = yaml.safe_load(f)
+            return config if config else {}
     except (pkg_resources.DistributionNotFound, FileNotFoundError):
         # Fall back to local path for development
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        default_config_path = os.path.join(current_dir, 'default_config.yaml')
+        default_config_path = os.path.join(current_dir, "default_config.yaml")
         try:
-            with open(default_config_path, 'r') as f:
-                return yaml.safe_load(f)
+            with open(default_config_path, "r") as f:
+                config = yaml.safe_load(f)
+                return config if config else {}
         except FileNotFoundError:
             # Return empty dict if default config file not found
             return {}
 
+
 def load_config(config_path: Optional[str] = None) -> Configuration:
-    """Load configuration from a YAML file, with fallback to default values."""
+    """Load configuration from a YAML file, with fallback to default values.
+
+    Args:
+        config_path: Optional path to a custom configuration file
+
+    Returns:
+        Configuration object with applied settings
+    """
     # Load default configuration
     default_config_data = get_default_config()
-    
+
     # Create default configuration object
     docker_config = DockerConfig()
     package_config = PackageConfig()
-    
+
     # Apply default config data if available
     if default_config_data:
         if "docker" in default_config_data:
@@ -76,58 +96,70 @@ def load_config(config_path: Optional[str] = None) -> Configuration:
             for key, value in docker.items():
                 if hasattr(docker_config, key):
                     setattr(docker_config, key, value)
-                    
+
         if "package" in default_config_data:
             package = default_config_data["package"]
             for key, value in package.items():
                 if hasattr(package_config, key):
                     setattr(package_config, key, value)
-    
+
+    # Get allowed and blocked modules with proper type handling
+    allowed_modules: List[str] = default_config_data.get("allowed_modules", [])
+    blocked_modules: List[str] = default_config_data.get("blocked_modules", [])
+
+    # Ensure allowed_modules and blocked_modules are always lists
+    if allowed_modules is None:
+        allowed_modules = []
+    if blocked_modules is None:
+        blocked_modules = []
+
     default_config = Configuration(
         docker=docker_config,
         package=package_config,
-        allowed_modules=default_config_data.get("allowed_modules"),
-        blocked_modules=default_config_data.get("blocked_modules")
+        allowed_modules=cast(List[str], allowed_modules),
+        blocked_modules=cast(List[str], blocked_modules),
     )
-    
+
     # If no custom config path provided, look in standard locations
     if not config_path:
         # Check environment variable
         config_path = os.environ.get("PYTHON_DOCKER_MCP_CONFIG")
-        
+
         # Check user config directory
         if not config_path or not os.path.exists(config_path):
             config_dir = os.path.join(os.path.expanduser("~"), ".python-docker-mcp")
             config_path = os.path.join(config_dir, "config.yaml")
-    
+
     # If custom config exists, apply it on top of defaults
     if config_path and os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
-                config_data = yaml.safe_load(f)
-                
+                config_data = yaml.safe_load(f) or {}
+
             # Parse docker configuration
-            if config_data and "docker" in config_data:
+            if "docker" in config_data:
                 docker = config_data["docker"]
                 for key, value in docker.items():
                     if hasattr(default_config.docker, key):
                         setattr(default_config.docker, key, value)
-            
+
             # Parse package configuration
-            if config_data and "package" in config_data:
+            if "package" in config_data:
                 package = config_data["package"]
                 for key, value in package.items():
                     if hasattr(default_config.package, key):
                         setattr(default_config.package, key, value)
-            
+
             # Apply other settings
-            if config_data and "allowed_modules" in config_data:
-                default_config.allowed_modules = config_data["allowed_modules"]
-                
-            if config_data and "blocked_modules" in config_data:
-                default_config.blocked_modules = config_data["blocked_modules"]
-                
+            if "allowed_modules" in config_data:
+                modules = config_data["allowed_modules"]
+                default_config.allowed_modules = [] if modules is None else cast(List[str], modules)
+
+            if "blocked_modules" in config_data:
+                modules = config_data["blocked_modules"]
+                default_config.blocked_modules = [] if modules is None else cast(List[str], modules)
+
         except Exception as e:
             print(f"Error loading configuration from {config_path}: {e}")
-    
-    return default_config 
+
+    return default_config

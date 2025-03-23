@@ -21,15 +21,15 @@ from python_docker_mcp.client import PythonDockerClient
 async def main():
     # Create a client instance
     client = PythonDockerClient()
-    
+
     try:
         # Connect to the server
         await client.connect_to_server()
-        
+
         # Execute code in a transient container
         result = await client.execute_transient("print('Hello, World!')")
         print(result["output"])  # Output: Hello, World!
-        
+
     finally:
         # Always close the connection when done
         if client.session:
@@ -62,7 +62,7 @@ Connects to the MCP server.
 - **Parameters:**
   - `server_script_path` (str, optional): Path to the server script. If not provided, the default server script will be used.
 - **Returns:** None
-- **Raises:** 
+- **Raises:**
   - `ValueError`: If the script path has an unsupported extension.
   - `Exception`: If connection fails.
 
@@ -138,12 +138,12 @@ async def persistent_example(client):
     code1 = "x = 10\nprint(f'x = {x}')"
     result1, session_id = await client.execute_persistent(code1)
     print(result1["output"])  # Output: x = 10
-    
+
     # Continue the session with another piece of code
     code2 = "x += 5\nprint(f'x now equals {x}')"
     result2, session_id = await client.execute_persistent(code2, session_id)
     print(result2["output"])  # Output: x now equals 15
-    
+
     # Always clean up the session when done
     await client.cleanup_session(session_id)
 ```
@@ -156,12 +156,12 @@ You can install Python packages in persistent containers:
 async def install_package_example(client):
     # Start a session
     _, session_id = await client.execute_persistent("print('Session started')")
-    
+
     # Install numpy
     result = await client.install_package("numpy", session_id)
     if result["success"]:
         print(f"Successfully installed {result['package_name']}")
-    
+
     # Use the installed package
     code = """
     import numpy as np
@@ -170,7 +170,7 @@ async def install_package_example(client):
     """
     result, _ = await client.execute_persistent(code, session_id)
     print(result["output"])  # Output: Mean: 3.0
-    
+
     # Clean up
     await client.cleanup_session(session_id)
 ```
@@ -183,7 +183,7 @@ The client provides information about errors that occur during code execution:
 async def error_handling_example(client):
     # Execute code with an error
     result = await client.execute_transient("print(undefined_variable)")
-    
+
     if result["error"]:
         print(f"Error occurred: {result['error']}")
     else:
@@ -202,4 +202,4 @@ The client automatically detects the script type based on its extension and will
 
 ## Complete Example
 
-For a complete example demonstrating all the features, see the [client_example.py](../examples/client_example.py) file included in the package. 
+For a complete example demonstrating all the features, see the [client_example.py](../examples/client_example.py) file included in the package.

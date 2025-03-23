@@ -3,18 +3,18 @@
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import mcp.types as types
+import pytest
 from pydantic import AnyUrl
 
 from python_docker_mcp.server import (
-    handle_list_resources,
-    handle_read_resource,
-    handle_list_prompts,
-    handle_get_prompt,
-    handle_list_tools,
-    handle_call_tool,
     _format_execution_result,
+    handle_call_tool,
+    handle_get_prompt,
+    handle_list_prompts,
+    handle_list_resources,
+    handle_list_tools,
+    handle_read_resource,
 )
 
 
@@ -57,14 +57,14 @@ async def test_handle_list_tools():
     tools = await handle_list_tools()
     assert isinstance(tools, list)
     assert len(tools) == 4
-    
+
     # Verify the tool names
     tool_names = [tool.name for tool in tools]
     assert "execute-transient" in tool_names
     assert "execute-persistent" in tool_names
     assert "install-package" in tool_names
     assert "cleanup-session" in tool_names
-    
+
     # Verify the tools have proper schemas
     for tool in tools:
         assert isinstance(tool.inputSchema, dict)
@@ -90,16 +90,16 @@ async def test_handle_call_tool_execute_transient(mock_docker_manager):
         "__stdout__": "Test output",
         "__stderr__": "",
         "__error__": None,
-        "value": 42
+        "value": 42,
     }
     mock_docker_manager.execute_transient = AsyncMock(return_value=result)
-    
+
     # Call the function
     response = await handle_call_tool("execute-transient", {"code": "print('test')"})
-    
+
     # Verify the call to the Docker manager
     mock_docker_manager.execute_transient.assert_called_once_with("print('test')", {})
-    
+
     # Verify the response
     assert len(response) == 1
     assert isinstance(response[0], types.TextContent)
@@ -115,15 +115,13 @@ async def test_handle_call_tool_execute_persistent_new_session(mock_uuid4, mock_
     mock_uuid4.return_value = uuid.UUID("00000000-0000-0000-0000-000000000001")
     result = {"output": "Test output", "error": None}
     mock_docker_manager.execute_persistent = AsyncMock(return_value=result)
-    
+
     # Call the function
     response = await handle_call_tool("execute-persistent", {"code": "print('test')"})
-    
+
     # Verify the call to the Docker manager
-    mock_docker_manager.execute_persistent.assert_called_once_with(
-        "00000000-0000-0000-0000-000000000001", "print('test')"
-    )
-    
+    mock_docker_manager.execute_persistent.assert_called_once_with("00000000-0000-0000-0000-000000000001", "print('test')")
+
     # Verify the response
     assert len(response) == 1
     assert isinstance(response[0], types.TextContent)
@@ -133,23 +131,23 @@ async def test_handle_call_tool_execute_persistent_new_session(mock_uuid4, mock_
 
 @pytest.mark.asyncio
 @patch("python_docker_mcp.server.docker_manager")
-async def test_handle_call_tool_execute_persistent_existing_session(mock_docker_manager):
+async def test_handle_call_tool_execute_persistent_existing_session(
+    mock_docker_manager,
+):
     """Test handle_call_tool with execute-persistent using an existing session."""
     # Setup the mock to return a proper result
     result = {"output": "Test output", "error": None}
     mock_docker_manager.execute_persistent = AsyncMock(return_value=result)
-    
+
     # Call the function
-    response = await handle_call_tool("execute-persistent", {
-        "code": "print('test')",
-        "session_id": "existing-session"
-    })
-    
-    # Verify the call to the Docker manager
-    mock_docker_manager.execute_persistent.assert_called_once_with(
-        "existing-session", "print('test')"
+    response = await handle_call_tool(
+        "execute-persistent",
+        {"code": "print('test')", "session_id": "existing-session"},
     )
-    
+
+    # Verify the call to the Docker manager
+    mock_docker_manager.execute_persistent.assert_called_once_with("existing-session", "print('test')")
+
     # Verify the response
     assert len(response) == 1
     assert isinstance(response[0], types.TextContent)
@@ -163,16 +161,13 @@ async def test_handle_call_tool_install_package(mock_docker_manager):
     """Test handle_call_tool with install-package."""
     # Setup the mock to return a proper result
     mock_docker_manager.install_package = AsyncMock(return_value="Successfully installed numpy")
-    
+
     # Call the function
-    response = await handle_call_tool("install-package", {
-        "package_name": "numpy",
-        "session_id": "test-session"
-    })
-    
+    response = await handle_call_tool("install-package", {"package_name": "numpy", "session_id": "test-session"})
+
     # Verify the call to the Docker manager
     mock_docker_manager.install_package.assert_called_once_with("test-session", "numpy")
-    
+
     # Verify the response
     assert len(response) == 1
     assert isinstance(response[0], types.TextContent)
@@ -188,13 +183,13 @@ async def test_handle_call_tool_cleanup_session(mock_sessions, mock_docker_manag
     # Setup the mock sessions
     mock_sessions.pop = MagicMock()
     mock_sessions.__contains__ = MagicMock(return_value=True)
-    
+
     # Call the function
     response = await handle_call_tool("cleanup-session", {"session_id": "test-session"})
-    
+
     # Verify the call to the Docker manager
     mock_docker_manager.cleanup_session.assert_called_once_with("test-session")
-    
+
     # Verify the response
     assert len(response) == 1
     assert isinstance(response[0], types.TextContent)
@@ -215,9 +210,9 @@ def test_format_execution_result_transient():
         "__stdout__": "Hello, world!",
         "__stderr__": "Warning: deprecated feature",
         "__error__": None,
-        "value": 42
+        "value": 42,
     }
-    
+
     formatted = _format_execution_result(result)
     assert "Execution Result:" in formatted
     assert "Hello, world!" in formatted
@@ -231,9 +226,9 @@ def test_format_execution_result_transient_with_error():
         "__stdout__": "Partial output",
         "__stderr__": "",
         "__error__": "NameError: name 'undefined_var' is not defined",
-        "value": None
+        "value": None,
     }
-    
+
     formatted = _format_execution_result(result)
     assert "Execution Result:" in formatted
     assert "Partial output" in formatted
@@ -242,11 +237,8 @@ def test_format_execution_result_transient_with_error():
 
 def test_format_execution_result_persistent():
     """Test _format_execution_result with persistent execution result."""
-    result = {
-        "output": "Result from persistent container",
-        "error": None
-    }
-    
+    result = {"output": "Result from persistent container", "error": None}
+
     formatted = _format_execution_result(result, "session-123")
     assert "Session ID: session-123" in formatted
     assert "Execution Result:" in formatted
@@ -256,13 +248,10 @@ def test_format_execution_result_persistent():
 
 def test_format_execution_result_persistent_with_error():
     """Test _format_execution_result with persistent execution result containing an error."""
-    result = {
-        "output": "Partial output",
-        "error": "SyntaxError: invalid syntax"
-    }
-    
+    result = {"output": "Partial output", "error": "SyntaxError: invalid syntax"}
+
     formatted = _format_execution_result(result, "session-123")
     assert "Session ID: session-123" in formatted
     assert "Execution Result:" in formatted
     assert "Partial output" in formatted
-    assert "Error: SyntaxError" in formatted 
+    assert "Error: SyntaxError" in formatted

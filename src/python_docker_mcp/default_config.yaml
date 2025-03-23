@@ -3,15 +3,15 @@
 docker:
   # Docker image to use for execution environments
   image: python:3.12.2-slim
-  
+
   # Working directory inside the container
   working_dir: /app
-  
+
   # Resource limits
   memory_limit: 256m
   cpu_limit: 0.5
   timeout: 30  # seconds
-  
+
   # Security settings
   network_disabled: true
   read_only: true
@@ -19,7 +19,7 @@ docker:
 package:
   # Package installer to use (uv or pip)
   installer: uv
-  
+
   # Optional PyPI mirror configuration
   index_url: null
   trusted_hosts: []
@@ -61,4 +61,4 @@ blocked_modules:
   - pathlib
   - tempfile
   - pty
-  - platform 
+  - platform

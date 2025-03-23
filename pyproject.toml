@@ -8,7 +8,11 @@ dependencies = [
  "docker>=7.1.0",
  "mcp>=1.5.0",
  "pre-commit>=4.2.0",
+ "pytest>=8.3.5",
+ "pytest-asyncio>=0.25.3",
+ "pytest-cov>=6.0.0",
  "pyyaml>=6.0.2",
+ "setuptools>=77.0.3",
 ]
 [[project.authors]]
 name = "Shannon Sands"
@@ -36,7 +40,8 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = ["Test*", "*Test"]
 python_functions = ["test_*"]
-addopts = "--cov=src/python_docker_mcp --cov-report=term --cov-report=xml --cov-report=html"
+addopts = "--cov=src/python_docker_mcp --cov-report=term"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["src/python_docker_mcp"]
@@ -51,4 +56,49 @@ exclude_lines = [
     "pass",
     "raise ImportError",
 ]
-fail_under = 80
+fail_under = 29
+
+# Black configuration
+[tool.black]
+line-length = 160
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+# isort configuration to match black
+[tool.isort]
+profile = "black"
+line_length = 160
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

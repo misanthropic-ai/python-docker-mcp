@@ -41,7 +41,8 @@ def mock_container():
     container.attrs = {"State": {"ExitCode": 0}}
     container.logs.return_value = b"Container logs"
     container.exec_run.return_value = MagicMock(
-        exit_code=0, output=b"---OUTPUT_START---\n{\"output\": \"Test output\", \"error\": null}\n---OUTPUT_END---"
+        exit_code=0,
+        output=b'---OUTPUT_START---\n{"output": "Test output", "error": null}\n---OUTPUT_END---',
     )
     return container
 
@@ -89,7 +90,7 @@ def temp_config_file():
         path = f.name
 
     yield path
-    
+
     # Cleanup
     if os.path.exists(path):
         os.unlink(path)
@@ -110,16 +111,16 @@ def mcp_server_mock():
 
 class MockAsyncIterator:
     """Mock async iterator for testing."""
-    
+
     def __init__(self, items):
         """Initialize with items to yield."""
         self.items = items
         self.index = 0
-        
+
     def __aiter__(self):
         """Return self as async iterator."""
         return self
-        
+
     async def __anext__(self):
         """Return next item or raise StopAsyncIteration."""
         if self.index >= len(self.items):
@@ -135,20 +136,26 @@ def mcp_client_mock():
     client = MagicMock()
     client.list_tools = AsyncMock()
     client.call_tool = AsyncMock()
-    
+
     # Configure default responses
-    tool1 = MagicMock(name="execute-transient", description="Execute Python code in a transient container")
-    tool2 = MagicMock(name="execute-persistent", description="Execute Python code in a persistent container")
+    tool1 = MagicMock(
+        name="execute-transient",
+        description="Execute Python code in a transient container",
+    )
+    tool2 = MagicMock(
+        name="execute-persistent",
+        description="Execute Python code in a persistent container",
+    )
     tool3 = MagicMock(name="install-package", description="Install a Python package")
     tool4 = MagicMock(name="cleanup-session", description="Clean up a persistent session")
-    
+
     response = MagicMock()
     response.tools = [tool1, tool2, tool3, tool4]
     client.list_tools.return_value = response
-    
+
     # Mock call_tool
     call_result = MagicMock()
     call_result.content = [MagicMock(type="text", text="Result of tool execution")]
     client.call_tool.return_value = call_result
-    
-    return client 
+
+    return client

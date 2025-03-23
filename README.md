@@ -11,6 +11,62 @@ This MCP server provides a safe, sandboxed Python execution environment for LLM-
 - Install packages as needed for specific tasks
 - Maintain state between execution steps
 
+## Installation
+
+### Requirements
+
+- Docker must be installed and running on the host system
+- Python 3.11 or later
+- `uv` for package management (recommended)
+
+### Install from PyPI
+
+```bash
+# Using uv (recommended)
+uv pip install python-docker-mcp
+
+# Using pip
+pip install python-docker-mcp
+```
+
+### Install from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/artivus/python-docker-mcp.git
+cd python-docker-mcp
+
+# Install with uv
+uv pip install -e .
+
+# Or with pip
+pip install -e .
+```
+
+## Quick Start
+
+### Running the Server
+
+The python-docker-mcp server can be started directly using the module:
+
+```bash
+python -m python_docker_mcp
+```
+
+This will start the MCP server and listen for JSONRPC requests on stdin/stdout.
+
+### Testing the Installation
+
+The package includes several test scripts to verify functionality:
+
+```bash
+# Test Docker integration directly
+python test_docker.py
+
+# Test the Python Docker MCP functionality
+python test_simple.py
+```
+
 ## Components
 
 ### Docker Execution Environment
@@ -53,6 +109,8 @@ The server provides the following tools:
 
 The server can be configured via a YAML configuration file. By default, it looks for a file at `~/.python-docker-mcp/config.yaml`.
 
+### Configuration File Structure
+
 Example configuration:
 
 ```yaml
@@ -66,9 +124,9 @@ docker:
   read_only: true
 
 package:
-  installer: uv
-  index_url: null
-  trusted_hosts: []
+  installer: uv  # or pip
+  index_url: null  # Set to your PyPI mirror if needed
+  trusted_hosts: []  # List of trusted hosts for pip/uv
 
 allowed_modules:
   - math
@@ -86,24 +144,43 @@ blocked_modules:
   - pathlib
 ```
 
-## Quickstart
+### Docker Configuration Options
 
-### Install
+| Option | Description | Default |
+|--------|-------------|---------|
+| `image` | Docker image to use for execution | `python:3.12.2-slim` |
+| `working_dir` | Working directory inside container | `/app` |
+| `memory_limit` | Memory limit for container | `256m` |
+| `cpu_limit` | CPU limit (0.0-1.0) | `0.5` |
+| `timeout` | Execution timeout in seconds | `30` |
+| `network_disabled` | Disable network access | `true` |
+| `read_only` | Run container in read-only mode | `true` |
 
-#### Claude Desktop
+### Package Installation Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `installer` | Package installer to use (`uv` or `pip`) | `uv` |
+| `index_url` | Custom PyPI index URL | `null` |
+| `trusted_hosts` | Trusted hosts for package installation | `[]` |
+
+## Integration with Claude and Anthropic Products
+
+### Claude Desktop
 
 On MacOS: `~/Library/Application\ Support/Claude/claude_desktop_config.json`
 On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Development/Unpublished Servers Configuration</summary>
-  ```
+  
+  ```json
   "mcpServers": {
     "python-docker-mcp": {
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/shannon/Workspace/artivus/python-docker-mcp",
+        "/path/to/python-docker-mcp",
         "run",
         "python-docker-mcp"
       ]
@@ -114,7 +191,8 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Published Servers Configuration</summary>
-  ```
+  
+  ```json
   "mcpServers": {
     "python-docker-mcp": {
       "command": "uvx",
@@ -126,45 +204,50 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
   ```
 </details>
 
-## Development
+## Programmatic Usage
 
-### Requirements
+You can also use the `DockerManager` class directly in your own Python applications:
 
-- Docker must be installed and running on the host system
-- Python 3.11 or later
-- `uv` for package management
+```python
+import asyncio
+from python_docker_mcp.docker_manager import DockerManager
 
-### Building and Publishing
+async def run_code():
+    # Create a DockerManager instance
+    docker_manager = DockerManager()
+    
+    # Execute code in a transient container
+    code = """
+    x = 42
+    y = 10
+    result = x + y
+    print(f"The answer is {result}")
+    """
+    
+    result = await docker_manager.execute_transient(code)
+    print(f"Execution result: {result}")
+    
+    # Create a persistent session
+    session_id = "test_session"
+    persist_code = """
+    def multiply(a, b):
+        return a * b
+    
+    result = multiply(6, 7)
+    print(f"6 × 7 = {result}")
+    """
+    
+    result = await docker_manager.execute_persistent(session_id, persist_code)
+    print(f"Persistent result: {result}")
+    
+    # Clean up the session when done
+    docker_manager.cleanup_session(session_id)
 
-To prepare the package for distribution:
-
-1. Sync dependencies and update lockfile:
-```bash
-uv sync
+if __name__ == "__main__":
+    asyncio.run(run_code())
 ```
 
-2. Build package distributions:
-```bash
-uv build
-```
-
-3. Publish to PyPI:
-```bash
-uv publish
-```
-
-### Debugging
-
-Since MCP servers run over stdio, debugging can be challenging. For the best debugging
-experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
-
-You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
-
-```bash
-npx @modelcontextprotocol/inspector uv --directory /path/to/python-docker-mcp run python-docker-mcp
-```
-
-## Example Usage
+## Example MCP Usage
 
 ### Transient Execution
 
@@ -205,3 +288,85 @@ result = await call_tool("execute-persistent", {
   "code": "import numpy as np\narr = np.array([1, 2, 3, 4, 5])\nprint(f'Mean: {np.mean(arr)}')"
 })
 ```
+
+## Development
+
+### Development Setup
+
+1. Clone the repository:
+```bash
+git clone https://github.com/artivus/python-docker-mcp.git
+cd python-docker-mcp
+```
+
+2. Set up development environment:
+```bash
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -e ".[dev]"
+```
+
+3. Install pre-commit hooks:
+```bash
+pre-commit install
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run tests with coverage
+pytest --cov=src/python_docker_mcp
+
+# Run specific test categories
+pytest tests/unit/
+pytest tests/integration/
+```
+
+### Manual Testing Scripts
+
+The package includes several manual test scripts for debugging:
+
+- `test_docker.py`: Tests Docker functionality directly
+- `test_simple.py`: Tests the DockerManager API
+- `test_server.py`: Tests the full MCP server
+
+### Building and Publishing
+
+To prepare the package for distribution:
+
+1. Sync dependencies and update lockfile:
+```bash
+uv sync
+```
+
+2. Build package distributions:
+```bash
+uv build
+```
+
+3. Publish to PyPI:
+```bash
+uv publish
+```
+
+### Debugging
+
+Since MCP servers run over stdio, debugging can be challenging. For the best debugging
+experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
+
+You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
+
+```bash
+npx @modelcontextprotocol/inspector uv --directory /path/to/python-docker-mcp run python-docker-mcp
+```
+
+## License
+
+[License information]
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
