@@ -71,6 +71,19 @@ The server implements two types of execution environments:
    - Variables defined in one execution are available in subsequent executions
    - Suitable for interactive, stateful REPL-like sessions
 
+### Preinstalled Packages
+
+The Docker containers come with several common scientific and data analysis libraries preinstalled:
+
+- **NumPy**: For numerical computing
+- **Pandas**: For data manipulation and analysis
+- **SciPy**: For scientific computing and technical computing
+- **Matplotlib**: For creating visualizations
+- **scikit-learn**: For machine learning
+- **SymPy**: For symbolic mathematics
+
+These packages can be imported directly without installation, making it easier to perform common data science tasks.
+
 ### Tools
 
 The server provides the following tools:

@@ -398,6 +398,13 @@ class DockerManager:
                 logger.info(f"Cleaning up container {container_id} for session {session_id}")
                 container = self.client.containers.get(container_id)
 
+                # Clean up persistence file if it exists
+                try:
+                    logger.info(f"Removing persistence file in container {container_id}")
+                    container.exec_run(cmd=["rm", "-f", "/app/persistent_vars.pkl"], workdir=self.config.docker.working_dir)
+                except Exception as e:
+                    logger.warning(f"Error removing persistence file: {e}")
+
                 # Check if container is running before stopping
                 if container.status == "running":
                     logger.info(f"Stopping container {container_id}")
@@ -562,6 +569,7 @@ import sys
 import io
 import os
 import traceback
+import pickle
 from contextlib import redirect_stdout, redirect_stderr
 
 print("Docker persistent execution script starting...")
@@ -572,6 +580,21 @@ print(f"Directory contents: {{os.listdir('.')}}")
 # Capture stdout and stderr
 stdout_capture = io.StringIO()
 stderr_capture = io.StringIO()
+
+# Path to store persisted variables
+PERSISTENCE_FILE = '/app/persistent_vars.pkl'
+
+# Load previously saved variables if they exist
+if os.path.exists(PERSISTENCE_FILE):
+    try:
+        with open(PERSISTENCE_FILE, 'rb') as f:
+            loaded_vars = pickle.load(f)
+            # Add loaded variables to globals
+            for var_name, var_value in loaded_vars.items():
+                globals()[var_name] = var_value
+        print(f"Loaded persistent variables from {{PERSISTENCE_FILE}}")
+    except Exception as e:
+        print(f"Error loading persistent variables: {{e}}")
 
 # Make sure state is serializable
 def ensure_serializable(obj):
@@ -593,17 +616,40 @@ try:
         # Execute directly in the global namespace so variables persist
         exec({repr(code)}, globals())
 
-        # Prepare a state dictionary of all variables in the global namespace
-        state_dict = {{}}
+        # Save variables for persistence - filter out modules, functions, and special variables
+        vars_to_save = {{}}
         for key, value in list(globals().items()):
-            if not key.startswith('__') and key not in ('ensure_serializable', 'stdout_capture', 'stderr_capture', 'json', 'sys', 'io', 'os', 'traceback', 'redirect_stdout', 'redirect_stderr'):
+            if (not key.startswith('__') and
+                not callable(value) and
+                not key in ('ensure_serializable', 'stdout_capture', 'stderr_capture',
+                           'json', 'sys', 'io', 'os', 'traceback', 'redirect_stdout',
+                           'redirect_stderr', 'pickle', 'PERSISTENCE_FILE', 'vars_to_save')):
                 try:
-                    # Try serializing to check if JSON-serializable
-                    json.dumps(value)
-                    state_dict[key] = value
-                except (TypeError, OverflowError):
-                    # If not serializable, use string representation
-                    state_dict[key] = ensure_serializable(value)
+                    # Try pickling to verify if it can be persisted
+                    pickle.dumps(value)
+                    vars_to_save[key] = value
+                except:
+                    # Skip values that can't be pickled
+                    pass
+
+        # Save variables to file
+        try:
+            with open(PERSISTENCE_FILE, 'wb') as f:
+                pickle.dump(vars_to_save, f)
+            print(f"Saved {{len(vars_to_save)}} variables to {{PERSISTENCE_FILE}}")
+        except Exception as e:
+            print(f"Error saving persistent variables: {{e}}")
+
+        # Prepare a state dictionary of all variables in the global namespace for JSON response
+        state_dict = {{}}
+        for key, value in vars_to_save.items():
+            try:
+                # Try serializing to check if JSON-serializable
+                json.dumps(value)
+                state_dict[key] = value
+            except (TypeError, OverflowError):
+                # If not serializable, use string representation
+                state_dict[key] = ensure_serializable(value)
 
         result = {{
             "output": stdout_capture.getvalue(),

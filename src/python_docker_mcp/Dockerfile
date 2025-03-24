@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install commonly used packages globally
-RUN uv pip install --system numpy pandas matplotlib scikit-learn sympy
+RUN uv pip install --system numpy pandas scipy matplotlib scikit-learn sympy
 
 # Set Python to not write bytecode and to flush stdout/stderr immediately
 ENV PYTHONDONTWRITEBYTECODE=1 \
