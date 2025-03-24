@@ -5,6 +5,7 @@ and dispatches them to the Docker execution environment.
 """
 
 import asyncio
+import json
 import logging
 import sys
 import uuid
@@ -139,12 +140,11 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
 
         result = await docker_manager.execute_transient(code, state)
 
-        return [
-            types.TextContent(
-                type="text",
-                text=_format_execution_result(result),
-            )
-        ]
+        # Format text result, but also include state in the response
+        formatted_text = _format_execution_result(result)
+
+        # Return both the output and the state for client use
+        return [types.TextContent(type="text", text=f"{formatted_text}\n\nState: {json.dumps(result, default=str)}")]
 
     elif name == "execute-persistent":
         code = arguments.get("code")
@@ -160,12 +160,13 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
 
         result = await docker_manager.execute_persistent(session_id, code)
 
-        return [
-            types.TextContent(
-                type="text",
-                text=_format_execution_result(result, session_id),
-            )
-        ]
+        # Format text result including state
+        formatted_text = _format_execution_result(result, session_id)
+
+        # Include the state dictionary in the response if available
+        state_dict = result.get("state", {})
+
+        return [types.TextContent(type="text", text=f"{formatted_text}\n\nState: {json.dumps(state_dict, default=str)}")]
 
     elif name == "install-package":
         package_name = arguments.get("package_name")

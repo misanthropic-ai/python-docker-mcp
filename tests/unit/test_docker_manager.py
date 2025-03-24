@@ -176,6 +176,9 @@ def test_cleanup_session(docker_manager, mock_docker_client, mock_container):
     # Setup existing persistent container
     docker_manager.persistent_containers = {"session-1": "test-container-id"}
 
+    # Set the container status to running to test stop is called
+    mock_container.status = "running"
+
     # Clean up the session
     docker_manager.cleanup_session("session-1")
 

@@ -395,13 +395,27 @@ class DockerManager:
         if session_id in self.persistent_containers:
             container_id = self.persistent_containers[session_id]
             try:
+                logger.info(f"Cleaning up container {container_id} for session {session_id}")
                 container = self.client.containers.get(container_id)
-                container.stop()
-                container.remove()
-            except Exception:
-                pass  # Ignore errors during cleanup
 
+                # Check if container is running before stopping
+                if container.status == "running":
+                    logger.info(f"Stopping container {container_id}")
+                    container.stop(timeout=5)
+
+                logger.info(f"Removing container {container_id}")
+                container.remove(force=True)  # Force removal in case it's still running
+                logger.info(f"Successfully removed container {container_id}")
+            except docker.errors.NotFound:
+                logger.warning(f"Container {container_id} not found during cleanup")
+            except Exception as e:
+                logger.error(f"Error cleaning up container {container_id}: {e}")
+
+            # Always remove session from tracking
             del self.persistent_containers[session_id]
+            logger.info(f"Removed session {session_id} from tracking")
+        else:
+            logger.warning(f"Session {session_id} not found during cleanup")
 
     def cleanup_all_sessions(self) -> None:
         """Clean up all persistent sessions."""
@@ -559,20 +573,49 @@ print(f"Directory contents: {{os.listdir('.')}}")
 stdout_capture = io.StringIO()
 stderr_capture = io.StringIO()
 
-# Execute code
+# Make sure state is serializable
+def ensure_serializable(obj):
+    \"\"\"Ensure all objects in state are JSON serializable.\"\"\"
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, (list, tuple)):
+        return [ensure_serializable(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {{k: ensure_serializable(v) for k, v in obj.items()}}
+    else:
+        # For non-serializable objects, convert to string representation
+        return str(obj)
+
+# Execute code in the global namespace to preserve variables between executions
 try:
     print("Executing code...")
     with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        exec({repr(code)})
+        # Execute directly in the global namespace so variables persist
+        exec({repr(code)}, globals())
+
+        # Prepare a state dictionary of all variables in the global namespace
+        state_dict = {{}}
+        for key, value in list(globals().items()):
+            if not key.startswith('__') and key not in ('ensure_serializable', 'stdout_capture', 'stderr_capture', 'json', 'sys', 'io', 'os', 'traceback', 'redirect_stdout', 'redirect_stderr'):
+                try:
+                    # Try serializing to check if JSON-serializable
+                    json.dumps(value)
+                    state_dict[key] = value
+                except (TypeError, OverflowError):
+                    # If not serializable, use string representation
+                    state_dict[key] = ensure_serializable(value)
+
         result = {{
             "output": stdout_capture.getvalue(),
-            "error": None
+            "error": None,
+            "state": state_dict
         }}
 except Exception as e:
     error_with_traceback = f"{{e}}\\n{{traceback.format_exc()}}"
     result = {{
         "output": stdout_capture.getvalue(),
-        "error": error_with_traceback
+        "error": error_with_traceback,
+        "state": {{}}
     }}
     print(f"Error during execution: {{error_with_traceback}}")
 
