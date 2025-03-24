@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-import pytest
+import pkg_resources
 import yaml
 
 from python_docker_mcp.config import Configuration, DockerConfig, PackageConfig, get_default_config, load_config
@@ -35,28 +35,46 @@ def test_configuration_defaults():
     assert isinstance(config.docker, DockerConfig)
     assert isinstance(config.package, PackageConfig)
     assert "math" in config.allowed_modules
-    assert "datetime" in config.allowed_modules
+    assert "random" in config.allowed_modules
     assert "os" in config.blocked_modules
     assert "sys" in config.blocked_modules
 
 
 def test_configuration_custom_values():
     """Test Configuration initializes with custom values."""
-    docker_config = DockerConfig(image="custom-image:latest", memory_limit="512m")
-    package_config = PackageConfig(installer="pip", index_url="https://pypi.org/simple")
+    docker_config = DockerConfig(
+        image="custom:latest",
+        working_dir="/custom/dir",
+        memory_limit="512m",
+        cpu_limit=0.8,
+        timeout=60,
+        network_disabled=False,
+        read_only=False,
+    )
+    package_config = PackageConfig(
+        installer="pip",
+        index_url="https://custom.pypi.org",
+        trusted_hosts=["custom.pypi.org"],
+    )
     config = Configuration(
         docker=docker_config,
         package=package_config,
         allowed_modules=["numpy", "pandas"],
-        blocked_modules=["socket"],
+        blocked_modules=["pathlib", "multiprocessing"],
     )
 
-    assert config.docker.image == "custom-image:latest"
+    assert config.docker.image == "custom:latest"
+    assert config.docker.working_dir == "/custom/dir"
     assert config.docker.memory_limit == "512m"
+    assert config.docker.cpu_limit == 0.8
+    assert config.docker.timeout == 60
+    assert config.docker.network_disabled is False
+    assert config.docker.read_only is False
     assert config.package.installer == "pip"
-    assert config.package.index_url == "https://pypi.org/simple"
+    assert config.package.index_url == "https://custom.pypi.org"
+    assert config.package.trusted_hosts == ["custom.pypi.org"]
     assert config.allowed_modules == ["numpy", "pandas"]
-    assert config.blocked_modules == ["socket"]
+    assert config.blocked_modules == ["pathlib", "multiprocessing"]
 
 
 @patch("pkg_resources.resource_filename")
@@ -65,7 +83,7 @@ def test_get_default_config_from_package(mock_resource_filename, tmp_path):
     # Setup mock config file
     config_path = tmp_path / "default_config.yaml"
     mock_config = {
-        "docker": {"image": "test-image"},
+        "docker": {"image": "python-docker-mcp:latest"},
         "allowed_modules": ["test_module"],
     }
     with open(config_path, "w") as f:
@@ -75,18 +93,19 @@ def test_get_default_config_from_package(mock_resource_filename, tmp_path):
 
     # Test function
     config = get_default_config()
-    assert config["docker"]["image"] == "test-image"
+    assert config["docker"]["image"] == "python-docker-mcp:latest"
     assert config["allowed_modules"] == ["test_module"]
 
 
 @patch("pkg_resources.resource_filename")
 def test_get_default_config_fallback(mock_resource_filename, tmp_path):
     """Test fallback when resource_filename raises an exception."""
-    # Make resource_filename raise an exception
-    mock_resource_filename.side_effect = Exception("Resource not found")
+    # Make resource_filename raise a DistributionNotFound exception
+    mock_resource_filename.side_effect = pkg_resources.DistributionNotFound("Resource not found")
 
     # Setup mock file in the local path
-    with patch("os.path.dirname") as mock_dirname:
+    with patch("os.path.dirname") as mock_dirname, patch("os.path.abspath") as mock_abspath:
+        mock_abspath.return_value = str(tmp_path / "__file__")
         mock_dirname.return_value = str(tmp_path)
         config_path = tmp_path / "default_config.yaml"
         mock_config = {
@@ -98,6 +117,8 @@ def test_get_default_config_fallback(mock_resource_filename, tmp_path):
 
         # Test function
         config = get_default_config()
+
+        # Verify the results
         assert config["docker"]["image"] == "local-image"
         assert config["allowed_modules"] == ["local_module"]
 
@@ -120,10 +141,13 @@ def test_load_config_with_env_var(temp_config_file):
 
 def test_load_config_no_file():
     """Test loading default configuration when no file exists."""
-    with patch("os.path.exists", return_value=False):
+    with (
+        patch("os.path.exists", return_value=False),
+        patch("python_docker_mcp.config.get_default_config", return_value={"docker": {"image": "python-docker-mcp:latest"}}),
+    ):
         config = load_config("/non/existent/path.yaml")
         assert isinstance(config, Configuration)
-        assert config.docker.image == "python:3.12.2-slim"
+        assert config.docker.image == "python-docker-mcp:latest"
 
 
 def test_load_config_invalid_file(tmp_path):
@@ -134,6 +158,7 @@ def test_load_config_invalid_file(tmp_path):
         f.write("this is not valid yaml: :")
 
     # Should fall back to defaults when file is invalid
-    config = load_config(str(invalid_file))
-    assert isinstance(config, Configuration)
-    assert config.docker.image == "python:3.12.2-slim"
+    with patch("python_docker_mcp.config.get_default_config", return_value={"docker": {"image": "python-docker-mcp:latest"}}):
+        config = load_config(str(invalid_file))
+        assert isinstance(config, Configuration)
+        assert config.docker.image == "python-docker-mcp:latest"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""
-Utility script to build a custom Docker image for python-docker-mcp.
+"""Utility script to build a custom Docker image for python-docker-mcp.
+
 This can be used to create a custom image with pre-installed packages.
 """
 
@@ -9,11 +9,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+from typing import Dict, Optional
 
 import pkg_resources
 
 
-def get_dockerfile_path():
+def get_dockerfile_path() -> str:
     """Get the path to the Dockerfile within the package."""
     try:
         # Try to get the Dockerfile from the installed package
@@ -24,14 +25,16 @@ def get_dockerfile_path():
         return os.path.join(current_dir, "Dockerfile")
 
 
-def build_docker_image(tag="python-docker-mcp:latest", dockerfile=None, build_args=None):
-    """
-    Build a Docker image for the Python execution environment.
+def build_docker_image(
+    tag: str = "python-docker-mcp:latest", dockerfile: Optional[str] = None, build_args: Optional[Dict[str, str]] = None, debug: bool = False
+) -> bool:
+    """Build a Docker image for the Python execution environment.
 
     Args:
         tag: Tag for the Docker image
         dockerfile: Path to a custom Dockerfile (defaults to the one included with the package)
         build_args: Dictionary of build arguments to pass to docker build
+        debug: Whether to enable verbose debugging output
 
     Returns:
         True if the build was successful, False otherwise
@@ -42,6 +45,13 @@ def build_docker_image(tag="python-docker-mcp:latest", dockerfile=None, build_ar
     if not os.path.exists(dockerfile):
         print(f"Error: Dockerfile not found at {dockerfile}")
         return False
+
+    # Print Dockerfile contents for debugging
+    if debug:
+        print("=== Dockerfile contents ===")
+        with open(dockerfile, "r") as f:
+            print(f.read())
+        print("==========================")
 
     # Create a build context directory
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -60,6 +70,9 @@ def build_docker_image(tag="python-docker-mcp:latest", dockerfile=None, build_ar
         # Run the build command
         try:
             print(f"Building Docker image {tag}...")
+            print(f"Command: {' '.join(cmd)}")
+            print(f"Build context: {temp_dir}")
+
             result = subprocess.run(
                 cmd,
                 cwd=temp_dir,
@@ -68,16 +81,19 @@ def build_docker_image(tag="python-docker-mcp:latest", dockerfile=None, build_ar
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
             )
-            print(result.stdout)
+            if debug or result.stdout:
+                print(result.stdout)
             print(f"Successfully built Docker image: {tag}")
             return True
         except subprocess.CalledProcessError as e:
             print(f"Error building Docker image: {e}")
+            print("=== Command output (stderr) ===")
             print(e.stderr)
+            print("===============================")
             return False
 
 
-def main():
+def main() -> int:
     """Command-line entry point for building Docker images."""
     parser = argparse.ArgumentParser(description="Build a Docker image for python-docker-mcp")
     parser.add_argument(
@@ -92,6 +108,7 @@ def main():
         dest="build_args",
         help="Build arguments to pass to docker build (format: NAME=VALUE)",
     )
+    parser.add_argument("--debug", action="store_true", help="Enable verbose debugging output")
 
     args = parser.parse_args()
 
@@ -106,7 +123,7 @@ def main():
                 print(f"Warning: Ignoring malformed build argument: {arg}")
 
     # Build the Docker image
-    success = build_docker_image(args.tag, args.dockerfile, build_args_dict)
+    success = build_docker_image(args.tag, args.dockerfile, build_args_dict, args.debug)
 
     # Exit with appropriate status code
     return 0 if success else 1

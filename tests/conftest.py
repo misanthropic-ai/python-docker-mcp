@@ -1,11 +1,9 @@
 """Test configuration and fixtures for python-docker-mcp."""
 
-import asyncio
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import docker
 import pytest
 import yaml
 
@@ -128,34 +126,3 @@ class MockAsyncIterator:
         item = self.items[self.index]
         self.index += 1
         return item
-
-
-@pytest.fixture
-def mcp_client_mock():
-    """Create a mock MCP client."""
-    client = MagicMock()
-    client.list_tools = AsyncMock()
-    client.call_tool = AsyncMock()
-
-    # Configure default responses
-    tool1 = MagicMock(
-        name="execute-transient",
-        description="Execute Python code in a transient container",
-    )
-    tool2 = MagicMock(
-        name="execute-persistent",
-        description="Execute Python code in a persistent container",
-    )
-    tool3 = MagicMock(name="install-package", description="Install a Python package")
-    tool4 = MagicMock(name="cleanup-session", description="Clean up a persistent session")
-
-    response = MagicMock()
-    response.tools = [tool1, tool2, tool3, tool4]
-    client.list_tools.return_value = response
-
-    # Mock call_tool
-    call_result = MagicMock()
-    call_result.content = [MagicMock(type="text", text="Result of tool execution")]
-    client.call_tool.return_value = call_result
-
-    return client

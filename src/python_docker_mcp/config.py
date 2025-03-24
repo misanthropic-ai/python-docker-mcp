@@ -50,7 +50,7 @@ class Configuration:
 
 
 def get_default_config() -> Dict[str, Any]:
-    """Load the default configuration from the embedded YAML file.
+    """Load the default configuration from the package's default_config.yaml file.
 
     Returns:
         Dictionary containing the default configuration values
@@ -116,8 +116,8 @@ def load_config(config_path: Optional[str] = None) -> Configuration:
     default_config = Configuration(
         docker=docker_config,
         package=package_config,
-        allowed_modules=cast(List[str], allowed_modules),
-        blocked_modules=cast(List[str], blocked_modules),
+        allowed_modules=allowed_modules,
+        blocked_modules=blocked_modules,
     )
 
     # If no custom config path provided, look in standard locations

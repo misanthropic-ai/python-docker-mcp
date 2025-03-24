@@ -2,9 +2,10 @@
 max-line-length = 160
 exclude = .git,__pycache__,docs/,build/,dist/,.venv/
 # E203 and W503 are not PEP 8 compliant and conflict with black
-ignore = E203,W503
+# D200, D205, D212 are more pedantic docstring style rules
+ignore = E203,W503,D200,D205,D212
 per-file-ignores =
     __init__.py:F401,F403
-    tests/*:D100,D101,D102,D103,D104
+    tests/*:D100,D101,D102,D103,D104,F401,F811,F841
     examples/*:D100,D101,D102,D103,D104
 docstring-convention = google

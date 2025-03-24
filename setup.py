@@ -1,3 +1,5 @@
+"""Setup script for python-docker-mcp package."""
+
 from setuptools import setup
 
 setup(

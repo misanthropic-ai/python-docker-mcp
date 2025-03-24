@@ -1,5 +1,14 @@
+"""Server module for the Python Docker MCP package.
+
+This module provides the MCP server implementation that handles API requests
+and dispatches them to the Docker execution environment.
+"""
+
 import asyncio
+import logging
+import sys
 import uuid
+from typing import Optional
 
 import mcp.server.stdio
 import mcp.types as types
@@ -7,7 +16,6 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
 
-from .config import load_config
 from .docker_manager import DockerManager
 
 # Initialize the Docker manager
@@ -16,13 +24,17 @@ docker_manager = DockerManager()
 # Store sessions for persistent code execution environments
 sessions = {}
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("python-docker-mcp")
+
 server = Server("python-docker-mcp")
 
 
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
-    """
-    List available resources.
+    """List available resources.
+
     Currently there are no resources to list.
     """
     return []
@@ -30,8 +42,8 @@ async def handle_list_resources() -> list[types.Resource]:
 
 @server.read_resource()
 async def handle_read_resource(uri: AnyUrl) -> str:
-    """
-    Read a specific resource by its URI.
+    """Read a specific resource by its URI.
+
     Currently there are no resources to read.
     """
     raise ValueError(f"Unsupported resource URI: {uri}")
@@ -39,8 +51,8 @@ async def handle_read_resource(uri: AnyUrl) -> str:
 
 @server.list_prompts()
 async def handle_list_prompts() -> list[types.Prompt]:
-    """
-    List available prompts.
+    """List available prompts.
+
     Currently there are no prompts defined.
     """
     return []
@@ -48,8 +60,8 @@ async def handle_list_prompts() -> list[types.Prompt]:
 
 @server.get_prompt()
 async def handle_get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
-    """
-    Generate a prompt.
+    """Generate a prompt.
+
     Currently there are no prompts defined.
     """
     raise ValueError(f"Unknown prompt: {name}")
@@ -57,36 +69,29 @@ async def handle_get_prompt(name: str, arguments: dict[str, str] | None) -> type
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
-    """
-    List available tools for Python code execution and package management.
-    """
+    """List available tools that can be called by clients."""
+    logger.info("Listing tools")
     return [
         types.Tool(
             name="execute-transient",
-            description="Execute Python code in a transient Docker container that doesn't persist state",
+            description="Execute Python code in a transient Docker container",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "code": {"type": "string", "description": "Python code to execute"},
-                    "state": {
-                        "type": "object",
-                        "description": "Optional state dictionary to provide to the execution environment",
-                    },
+                    "state": {"type": "object", "description": "Optional state dictionary"},
                 },
                 "required": ["code"],
             },
         ),
         types.Tool(
             name="execute-persistent",
-            description="Execute Python code in a persistent Docker container that retains state between calls",
+            description="Execute Python code in a persistent Docker container",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "code": {"type": "string", "description": "Python code to execute"},
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session identifier for the persistent environment (created automatically if not provided)",
-                    },
+                    "session_id": {"type": "string", "description": "Session identifier"},
                 },
                 "required": ["code"],
             },
@@ -97,14 +102,8 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "package_name": {
-                        "type": "string",
-                        "description": "Name of the package to install",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID for installing in a persistent environment",
-                    },
+                    "package_name": {"type": "string", "description": "Package name"},
+                    "session_id": {"type": "string", "description": "Optional session ID"},
                 },
                 "required": ["package_name"],
             },
@@ -115,10 +114,7 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session identifier to clean up",
-                    },
+                    "session_id": {"type": "string", "description": "Session identifier"},
                 },
                 "required": ["session_id"],
             },
@@ -128,9 +124,9 @@ async def handle_list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """
-    Handle tool execution requests for Python code execution and package management.
-    """
+    """Handle tool execution requests for Python code execution and package management."""
+    logger.info(f"Calling tool: {name}")
+
     if not arguments:
         raise ValueError("Missing arguments")
 
@@ -209,7 +205,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         raise ValueError(f"Unknown tool: {name}")
 
 
-def _format_execution_result(result, session_id=None):
+def _format_execution_result(result: dict, session_id: Optional[str] = None) -> str:
     """Format execution result for display."""
     if "__stdout__" in result and "__stderr__" in result and "__error__" in result:
         # Transient execution result
@@ -245,7 +241,17 @@ def _format_execution_result(result, session_id=None):
         return f"{session_text}Execution Result:\n\n{output}{error_text}"
 
 
-async def main():
+async def main() -> None:
+    """Start the MCP server.
+
+    This function initializes and runs the MCP server that handles code execution
+    requests and communicates with the Docker manager.
+    """
+    if "--debug" in sys.argv:
+        logging.basicConfig(level=logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug mode enabled")
+
     # Run the server using stdin/stdout streams
     try:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -263,4 +269,5 @@ async def main():
             )
     finally:
         # Clean up any remaining sessions when the server shuts down
+        logger.info("Cleaning up sessions")
         docker_manager.cleanup_all_sessions()

@@ -55,18 +55,6 @@ python -m python_docker_mcp
 
 This will start the MCP server and listen for JSONRPC requests on stdin/stdout.
 
-### Testing the Installation
-
-The package includes several test scripts to verify functionality:
-
-```bash
-# Test Docker integration directly
-python test_docker.py
-
-# Test the Python Docker MCP functionality
-python test_simple.py
-```
-
 ## Components
 
 ### Docker Execution Environment
@@ -173,7 +161,7 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Development/Unpublished Servers Configuration</summary>
-  
+
   ```json
   "mcpServers": {
     "python-docker-mcp": {
@@ -191,7 +179,7 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Published Servers Configuration</summary>
-  
+
   ```json
   "mcpServers": {
     "python-docker-mcp": {
@@ -203,49 +191,6 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
   }
   ```
 </details>
-
-## Programmatic Usage
-
-You can also use the `DockerManager` class directly in your own Python applications:
-
-```python
-import asyncio
-from python_docker_mcp.docker_manager import DockerManager
-
-async def run_code():
-    # Create a DockerManager instance
-    docker_manager = DockerManager()
-    
-    # Execute code in a transient container
-    code = """
-    x = 42
-    y = 10
-    result = x + y
-    print(f"The answer is {result}")
-    """
-    
-    result = await docker_manager.execute_transient(code)
-    print(f"Execution result: {result}")
-    
-    # Create a persistent session
-    session_id = "test_session"
-    persist_code = """
-    def multiply(a, b):
-        return a * b
-    
-    result = multiply(6, 7)
-    print(f"6 × 7 = {result}")
-    """
-    
-    result = await docker_manager.execute_persistent(session_id, persist_code)
-    print(f"Persistent result: {result}")
-    
-    # Clean up the session when done
-    docker_manager.cleanup_session(session_id)
-
-if __name__ == "__main__":
-    asyncio.run(run_code())
-```
 
 ## Example MCP Usage
 
@@ -324,14 +269,6 @@ pytest --cov=src/python_docker_mcp
 pytest tests/unit/
 pytest tests/integration/
 ```
-
-### Manual Testing Scripts
-
-The package includes several manual test scripts for debugging:
-
-- `test_docker.py`: Tests Docker functionality directly
-- `test_simple.py`: Tests the DockerManager API
-- `test_server.py`: Tests the full MCP server
 
 ### Building and Publishing
 

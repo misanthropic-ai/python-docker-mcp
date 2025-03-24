@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 import docker
 import pytest
 
-from python_docker_mcp.docker_manager import DockerExecutionError
+from python_docker_mcp.docker_manager import DockerExecutionError, DockerManager
 
 
 @pytest.mark.asyncio
@@ -154,21 +154,23 @@ async def test_install_package_transient(docker_manager, mock_docker_client, moc
 
 
 @pytest.mark.asyncio
-async def test_install_package_persistent_alt(docker_manager, mock_docker_client, mock_container):
-    """Test installing a package in a persistent container (alternative)."""
-    # Setup existing persistent container
-    docker_manager.persistent_containers = {"session-1": "test-container-id"}
+async def test_install_package_persistent(docker_manager, mock_docker_client, mock_container):
+    """Test installing a package in a persistent container."""
+    # Add a test session to the manager
+    session_id = "test-session"
+    docker_manager.persistent_containers[session_id] = "test-container-id"
 
-    # Set up container exec_run to return success for package installation
-    mock_container.exec_run.return_value = MagicMock(exit_code=0, output=b"Successfully installed numpy-1.24.0")
+    # Configure mock container executor
+    exec_mock = MagicMock()
+    exec_mock.exit_code = 0
+    exec_mock.output = b"Successfully installed pandas"
+    mock_container.exec_run.return_value = exec_mock
 
-    # Install package
-    output = await docker_manager.install_package("session-1", "numpy")
+    # Test installing a package in the persistent container
+    result = await docker_manager.install_package(session_id, "pandas")
 
-    # Verify the exec_run call
-    container = mock_docker_client.containers.get.return_value
-    container.exec_run.assert_called_once()
-    assert "Successfully installed numpy-1.24.0" in output
+    # Verify the result
+    assert "Successfully installed pandas" in result
 
 
 def test_cleanup_session(docker_manager, mock_docker_client, mock_container):
@@ -375,8 +377,26 @@ async def test_execute_persistent_error(docker_manager, mock_docker_client, mock
 
 
 @pytest.mark.asyncio
-async def test_install_package_transient_alt(docker_manager, mock_docker_client, mock_container):
-    """Test installing a package in a transient container (alternative)."""
+async def test_install_package_persistent(docker_manager, mock_docker_client, mock_container):
+    """Test installing a package in a persistent container."""
+    # Setup existing persistent container
+    docker_manager.persistent_containers = {"session-1": "test-container-id"}
+
+    # Set up container exec_run to return success for package installation
+    mock_container.exec_run.return_value = MagicMock(exit_code=0, output=b"Successfully installed numpy-1.24.0")
+
+    # Install package
+    output = await docker_manager.install_package("session-1", "numpy")
+
+    # Verify the exec_run call
+    container = mock_docker_client.containers.get.return_value
+    container.exec_run.assert_called_once()
+    assert "Successfully installed numpy-1.24.0" in output
+
+
+@pytest.mark.asyncio
+async def test_install_package_transient(docker_manager, mock_docker_client, mock_container):
+    """Test installing a package in a transient container."""
     # Ensure no persistent containers exist
     docker_manager.persistent_containers = {}
 

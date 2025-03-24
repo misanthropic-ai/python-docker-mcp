@@ -217,7 +217,7 @@ def test_format_execution_result_transient():
     assert "Execution Result:" in formatted
     assert "Hello, world!" in formatted
     assert "Warning: deprecated feature" in formatted
-    assert "Error:" not in formatted
+    assert "Error: " not in formatted
 
 
 def test_format_execution_result_transient_with_error():

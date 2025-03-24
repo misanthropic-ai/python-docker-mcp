@@ -1,21 +1,19 @@
 """Unit tests for the MCP server implementation."""
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import mcp.types as types
 from pydantic import AnyUrl
 
 from python_docker_mcp.server import (
-    handle_list_resources,
-    handle_read_resource,
-    handle_list_prompts,
-    handle_get_prompt,
-    handle_list_tools,
-    handle_call_tool,
     _format_execution_result,
+    handle_call_tool,
+    handle_get_prompt,
+    handle_list_prompts,
+    handle_list_resources,
+    handle_list_tools,
+    handle_read_resource,
     main,
 )
 
@@ -56,14 +54,14 @@ async def test_handle_list_tools():
     tools = await handle_list_tools()
     assert isinstance(tools, list)
     assert len(tools) == 4
-    
+
     # Check that all required tools are present
     tool_names = [tool.name for tool in tools]
     assert "execute-transient" in tool_names
     assert "execute-persistent" in tool_names
     assert "install-package" in tool_names
     assert "cleanup-session" in tool_names
-    
+
     # Verify each tool has proper schema
     for tool in tools:
         assert tool.name is not None
@@ -85,10 +83,10 @@ async def test_handle_call_tool_execute_transient(mock_docker_manager):
         "__error__": None,
         "result": 42,
     }
-    
+
     # Call the handler
     result = await handle_call_tool("execute-transient", {"code": "print('Hello')"})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -108,13 +106,13 @@ async def test_handle_call_tool_execute_transient_with_state(mock_docker_manager
         "__error__": None,
         "result": {"x": 42},
     }
-    
+
     # Initial state to pass
     state = {"previous": "data"}
-    
+
     # Call the handler
     result = await handle_call_tool("execute-transient", {"code": "print(x)", "state": state})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -128,7 +126,7 @@ async def test_handle_call_tool_execute_persistent_new_session(mock_uuid4, mock_
     """Test executing code in a new persistent container."""
     # Mock UUID generation
     mock_uuid4.return_value = uuid.UUID("12345678-1234-5678-1234-567812345678")
-    
+
     # Mock the Docker manager
     mock_docker_manager.execute_persistent = AsyncMock()
     mock_docker_manager.execute_persistent.return_value = {
@@ -137,19 +135,17 @@ async def test_handle_call_tool_execute_persistent_new_session(mock_uuid4, mock_
         "__error__": None,
         "result": {"x": 42},
     }
-    
+
     # Call the handler
     result = await handle_call_tool("execute-persistent", {"code": "x = 42"})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
     assert "Session ID: 12345678-1234-5678-1234-567812345678" in result[0].text
     assert "Hello from persistent!" in result[0].text
     # First parameter is the generated session ID
-    mock_docker_manager.execute_persistent.assert_called_once_with(
-        "12345678-1234-5678-1234-567812345678", "x = 42"
-    )
+    mock_docker_manager.execute_persistent.assert_called_once_with("12345678-1234-5678-1234-567812345678", "x = 42")
 
 
 @patch("python_docker_mcp.server.docker_manager")
@@ -164,11 +160,11 @@ async def test_handle_call_tool_execute_persistent_existing_session(mock_docker_
         "__error__": None,
         "result": {"x": 42, "y": 10},
     }
-    
+
     # Call the handler with an existing session ID
     session_id = "existing-session-id"
     result = await handle_call_tool("execute-persistent", {"code": "y = 10", "session_id": session_id})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -184,10 +180,10 @@ async def test_handle_call_tool_install_package_transient(mock_docker_manager):
     # Mock the Docker manager
     mock_docker_manager.install_package = AsyncMock()
     mock_docker_manager.install_package.return_value = "Successfully installed numpy-1.24.0"
-    
+
     # Call the handler
     result = await handle_call_tool("install-package", {"package_name": "numpy"})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -203,11 +199,11 @@ async def test_handle_call_tool_install_package_persistent(mock_docker_manager):
     # Mock the Docker manager
     mock_docker_manager.install_package = AsyncMock()
     mock_docker_manager.install_package.return_value = "Successfully installed pandas-1.5.0"
-    
+
     # Call the handler with a session ID
     session_id = "test-session"
     result = await handle_call_tool("install-package", {"package_name": "pandas", "session_id": session_id})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -222,11 +218,11 @@ async def test_handle_call_tool_cleanup_session(mock_docker_manager):
     """Test cleaning up a session."""
     # Mock the Docker manager
     mock_docker_manager.cleanup_session = MagicMock()
-    
+
     # Call the handler
     session_id = "session-to-cleanup"
     result = await handle_call_tool("cleanup-session", {"session_id": session_id})
-    
+
     # Verify the response
     assert len(result) == 1
     assert result[0].type == "text"
@@ -254,7 +250,7 @@ async def test_handle_call_tool_missing_code():
     # We need to use a non-empty arguments dict to get past the "Missing arguments" check
     with pytest.raises(ValueError, match="Missing code"):
         await handle_call_tool("execute-transient", {"some_arg": "value"})
-    
+
     with pytest.raises(ValueError, match="Missing code"):
         await handle_call_tool("execute-persistent", {"some_arg": "value"})
 
@@ -283,7 +279,7 @@ def test_format_execution_result_success():
         "__error__": None,
         "result": {"x": 42, "y": "test"},
     }
-    
+
     # Note: The actual implementation doesn't include the result dict in the output
     formatted = _format_execution_result(result)
     assert "Execution Result:" in formatted
@@ -300,7 +296,7 @@ def test_format_execution_result_with_error():
         "__error__": "NameError: name 'undefined_var' is not defined",
         "result": None,
     }
-    
+
     formatted = _format_execution_result(result)
     assert "Execution Result:" in formatted
     assert "Starting execution..." in formatted
@@ -318,7 +314,7 @@ def test_format_execution_result_with_stderr():
         "__error__": None,
         "result": 42,
     }
-    
+
     formatted = _format_execution_result(result)
     assert "Execution Result:" in formatted
     assert "Regular output" in formatted
@@ -326,18 +322,20 @@ def test_format_execution_result_with_stderr():
     assert "Warning: deprecated feature" in formatted
 
 
-@patch("python_docker_mcp.server.mcp.server.stdio.stdio_server")
-@patch("python_docker_mcp.server.load_config")
 @pytest.mark.asyncio
-async def test_main(mock_load_config, mock_stdio_server):
+async def test_main():
     """Test the main function."""
-    # Mock the server and config
-    mock_server_instance = AsyncMock()
-    mock_stdio_server.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
-    mock_load_config.return_value = {"docker": {"image": "test-image"}}
-    
-    # Call the function
-    await main()
-    
-    # Verify the server was started
-    mock_stdio_server.assert_called_once() 
+    # Create mock async context manager
+    mock_context = AsyncMock()
+    mock_read_stream = AsyncMock()
+    mock_write_stream = AsyncMock()
+    mock_context.__aenter__.return_value = (mock_read_stream, mock_write_stream)
+
+    # Apply the patches
+    with (
+        patch("mcp.server.stdio.stdio_server", return_value=mock_context),
+        patch("python_docker_mcp.server.server.run"),
+        patch("python_docker_mcp.server.docker_manager"),
+    ):
+        # Run the main function
+        await main()

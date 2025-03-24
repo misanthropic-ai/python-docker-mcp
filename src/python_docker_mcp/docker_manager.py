@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from typing import Any, Dict, Optional
@@ -9,6 +10,9 @@ from typing import Any, Dict, Optional
 import docker
 
 from .config import Configuration, load_config
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class DockerExecutionError(Exception):
@@ -27,8 +31,7 @@ class DockerManager:
         self.persistent_containers: Dict[str, str] = {}  # session_id -> container_id
 
     async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Execute code in a new container that doesn't persist state.
+        """Execute code in a new container that doesn't persist state.
 
         Args:
             code: The Python code to execute
@@ -40,6 +43,22 @@ class DockerManager:
         if state is None:
             state = {}
 
+        # Ensure the state is serializable
+        def ensure_serializable(obj: Any) -> Any:
+            """Ensure all objects in state are JSON serializable."""
+            if isinstance(obj, (str, int, float, bool, type(None))):
+                return obj
+            elif isinstance(obj, (list, tuple)):
+                return [ensure_serializable(item) for item in obj]
+            elif isinstance(obj, dict):
+                return {k: ensure_serializable(v) for k, v in obj.items()}
+            else:
+                # For non-serializable objects, convert to string representation
+                return str(obj)
+
+        # Make sure the state is fully serializable before starting
+        serializable_state = ensure_serializable(state)
+
         try:
             # Create temporary directory to mount inside the container
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -50,13 +69,13 @@ class DockerManager:
 
                 # Write state to a JSON file
                 with open(state_path, "w") as f:
-                    json.dump(state, f)
+                    json.dump(serializable_state, f)
 
                 # Create a wrapper script that loads the state, executes the code, and saves the state
                 with open(script_path, "w") as f:
                     f.write(self._create_wrapper_script(code))
 
-                # Run container with the script
+                # Run container with the script - ensure use of virtual environment
                 container = self.client.containers.run(
                     image=self.config.docker.image,
                     command=["python", "/app/script.py"],
@@ -68,6 +87,7 @@ class DockerManager:
                     read_only=self.config.docker.read_only,
                     remove=True,
                     detach=True,
+                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
                 )
 
                 # Wait for the container to finish or timeout
@@ -84,10 +104,25 @@ class DockerManager:
 
                     # Load output state
                     if os.path.exists(output_path):
-                        with open(output_path, "r") as f:
-                            return json.load(f)
+                        try:
+                            with open(output_path, "r") as f:
+                                output_content = f.read()
+                                try:
+                                    return json.loads(output_content)
+                                except json.JSONDecodeError as je:
+                                    # If there's a JSON parsing error, provide more context
+                                    logs = container.logs().decode("utf-8") if container else "No logs available"
+                                    raise DockerExecutionError(
+                                        f"JSON parse error at position {je.pos}: {je.msg}. "
+                                        f"Content: {output_content[:100]}{'...' if len(output_content) > 100 else ''} "
+                                        f"Logs: {logs}"
+                                    )
+                        except Exception as e:
+                            logs = container.logs().decode("utf-8") if container else "No logs available"
+                            raise DockerExecutionError(f"Error reading output file: {e}. Logs: {logs}")
                     else:
-                        raise DockerExecutionError("Execution failed to produce output state")
+                        logs = container.logs().decode("utf-8") if container else "No logs available"
+                        raise DockerExecutionError(f"Execution failed to produce output state. Logs: {logs}")
 
                 except asyncio.TimeoutError:
                     # Force stop the container if it times out
@@ -103,8 +138,7 @@ class DockerManager:
             raise
 
     async def execute_persistent(self, session_id: str, code: str) -> Dict[str, Any]:
-        """
-        Execute code in a persistent container that retains state between calls.
+        """Execute code in a persistent container that retains state between calls.
 
         Args:
             session_id: A unique identifier for the session
@@ -117,6 +151,10 @@ class DockerManager:
 
         # Create a new container if it doesn't exist
         if not container_id:
+            # Store the desired network state to track later
+            should_disable_network = self.config.docker.network_disabled
+
+            # Always create with network initially enabled, we can disable it after setup if needed
             container = self.client.containers.run(
                 image=self.config.docker.image,
                 command=[
@@ -127,26 +165,68 @@ class DockerManager:
                 working_dir=self.config.docker.working_dir,
                 mem_limit=self.config.docker.memory_limit,
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
-                network_disabled=self.config.docker.network_disabled,
+                network_disabled=False,  # Initialize with network enabled for setup
                 read_only=False,  # Need to be writable for persistent sessions
                 detach=True,
+                labels={
+                    "python_docker_mcp.network_disabled": str(should_disable_network),
+                    "python_docker_mcp.session_id": session_id,
+                },
             )
             container_id = container.id
             self.persistent_containers[session_id] = container_id
 
+            # After container is created and set up, disable network if that was the config setting
+            if should_disable_network:
+                try:
+                    # Refresh the container object to get updated network info
+                    container = self.client.containers.get(container_id)
+
+                    # Disconnect from all networks if network should be disabled
+                    for network_name in container.attrs.get("NetworkSettings", {}).get("Networks", {}):
+                        try:
+                            self.client.networks.get(network_name).disconnect(container)
+                            logger.info(f"Disabled network {network_name} for container {container_id}")
+                        except Exception as e:
+                            logger.warning(f"Could not disable network {network_name}: {e}")
+                except Exception as e:
+                    logger.warning(f"Could not apply network settings to container {container_id}: {e}")
+
         # Execute the code in the container
         try:
-            # Create a temporary file with the code
-            with tempfile.NamedTemporaryFile(suffix=".py", mode="w") as f:
-                wrapped_code = self._create_execute_persist_script(code)
-                f.write(wrapped_code)
-                f.flush()
+            container = self.client.containers.get(container_id)
 
-                # Copy the script to the container
-                os.system(f"docker cp {f.name} {container_id}:/app/execute_script.py")
+            # Instead of using a temporary file + docker cp, create the file directly in the container
+            wrapped_code = self._create_execute_persist_script(code)
+
+            # Create script directly in container using a shell command with echo
+            # Escape the script for shell safety
+            escaped_code = wrapped_code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+
+            # Write the script directly to /app using echo
+            write_cmd = f'echo "{escaped_code}" > /app/execute_script.py'
+            exec_result = container.exec_run(
+                cmd=["bash", "-c", write_cmd],
+                workdir=self.config.docker.working_dir,
+            )
+
+            if exec_result.exit_code != 0:
+                output = exec_result.output.decode("utf-8").strip()
+                raise DockerExecutionError(f"Failed to create script in container: {output}")
+
+            # Make the script executable
+            chmod_cmd = "chmod 755 /app/execute_script.py"
+            exec_result = container.exec_run(
+                cmd=["bash", "-c", chmod_cmd],
+                workdir=self.config.docker.working_dir,
+            )
+
+            if exec_result.exit_code != 0:
+                output = exec_result.output.decode("utf-8").strip()
+                raise DockerExecutionError(f"Failed to make script executable: {output}")
 
             # Execute the script in the container
-            exec_result = self.client.containers.get(container_id).exec_run(
+            exec_result = container.exec_run(
                 cmd=["python", "/app/execute_script.py"],
                 workdir=self.config.docker.working_dir,
             )
@@ -179,8 +259,7 @@ class DockerManager:
             raise
 
     async def install_package(self, session_id: Optional[str], package_name: str) -> str:
-        """
-        Install a Python package in a container.
+        """Install a Python package in a container.
 
         Args:
             session_id: The session ID for persistent containers, or None for transient
@@ -190,7 +269,11 @@ class DockerManager:
             The output of the installation command
         """
         install_cmd = []
-        if self.config.package.installer == "uv":
+        primary_installer = self.config.package.installer
+
+        # Build the command for the primary installer (uv or pip)
+        if primary_installer == "uv":
+            # Use uv without --system flag since we're in a virtual env
             install_cmd = ["uv", "pip", "install"]
             if self.config.package.index_url:
                 install_cmd.extend(["--index-url", self.config.package.index_url])
@@ -208,26 +291,107 @@ class DockerManager:
         if session_id and session_id in self.persistent_containers:
             # Install in the persistent container
             container_id = self.persistent_containers[session_id]
-            exec_result = self.client.containers.get(container_id).exec_run(
+            container = self.client.containers.get(container_id)
+
+            # Temporarily enable networking for package installation if it was disabled
+            # Save the current network settings
+            network_was_disabled = False
+            if hasattr(container, "attrs") and "NetworkSettings" in container.attrs:
+                network_settings = container.attrs["NetworkSettings"]
+                network_was_disabled = not bool(network_settings.get("Networks"))
+
+            # If network was disabled, reconnect to the default network
+            if network_was_disabled:
+                try:
+                    self.client.networks.get("bridge").connect(container)
+                    logger.info(f"Temporarily enabled network for container {container_id}")
+                except Exception as e:
+                    logger.warning(f"Could not enable networking for container: {e}")
+
+            # Try the primary installer first
+            exec_result = container.exec_run(
                 cmd=install_cmd,
                 workdir=self.config.docker.working_dir,
+                environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
             )
+
+            # If the primary installer fails and it's uv, fall back to pip
+            if exec_result.exit_code != 0 and primary_installer == "uv":
+                # Build the fallback pip command
+                fallback_cmd = ["pip", "install"]
+                if self.config.package.index_url:
+                    fallback_cmd.extend(["--index-url", self.config.package.index_url])
+                for host in self.config.package.trusted_hosts or []:
+                    fallback_cmd.extend(["--trusted-host", host])
+                fallback_cmd.append(package_name)
+
+                # Try with pip instead
+                exec_result = container.exec_run(
+                    cmd=fallback_cmd,
+                    workdir=self.config.docker.working_dir,
+                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
+                )
+
+            # If network was disabled and we enabled it, disconnect it again
+            if network_was_disabled:
+                try:
+                    self.client.networks.get("bridge").disconnect(container)
+                    logger.info(f"Restored network settings for container {container_id}")
+                except Exception as e:
+                    logger.warning(f"Could not restore network settings: {e}")
+
             return exec_result.output.decode("utf-8")
         else:
             # Create a temporary container just for installation
-            container = self.client.containers.run(
-                image=self.config.docker.image,
-                command=install_cmd,
-                working_dir=self.config.docker.working_dir,
-                network_disabled=False,  # Need network for package installation
-                remove=True,
-            )
-            return container.logs().decode("utf-8")
+            try:
+                # Use run instead of create+start to wait for completion
+                result = self.client.containers.run(
+                    image=self.config.docker.image,
+                    command=install_cmd,
+                    working_dir=self.config.docker.working_dir,
+                    network_disabled=False,  # Explicitly enable network for package installation
+                    remove=True,
+                    detach=False,  # Run in foreground and return output directly
+                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
+                )
+
+                # Result is already a bytes object, so just decode it
+                if isinstance(result, bytes):
+                    return result.decode("utf-8")
+                else:
+                    # If for some reason we get a container back instead of bytes
+                    return result.logs().decode("utf-8")
+
+            except Exception as e:
+                # If primary installer fails and it's uv, try with pip
+                if primary_installer == "uv" and "executable file not found" in str(e):
+                    fallback_cmd = ["pip", "install"]
+                    if self.config.package.index_url:
+                        fallback_cmd.extend(["--index-url", self.config.package.index_url])
+                    for host in self.config.package.trusted_hosts or []:
+                        fallback_cmd.extend(["--trusted-host", host])
+                    fallback_cmd.append(package_name)
+
+                    result = self.client.containers.run(
+                        image=self.config.docker.image,
+                        command=fallback_cmd,
+                        working_dir=self.config.docker.working_dir,
+                        network_disabled=False,  # Explicitly enable network for package installation
+                        remove=True,
+                        detach=False,  # Run in foreground and return output directly
+                        environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
+                    )
+
+                    # Result is already a bytes object, so just decode it
+                    if isinstance(result, bytes):
+                        return result.decode("utf-8")
+                    else:
+                        # If for some reason we get a container back instead of bytes
+                        return result.logs().decode("utf-8")
+                raise
 
     def cleanup_session(self, session_id: str) -> None:
-        """
-        Clean up a persistent session by stopping and removing its container.
-        """
+        """Clean up a persistent session by stopping and removing its container."""
         if session_id in self.persistent_containers:
             container_id = self.persistent_containers[session_id]
             try:
@@ -240,9 +404,7 @@ class DockerManager:
             del self.persistent_containers[session_id]
 
     def cleanup_all_sessions(self) -> None:
-        """
-        Clean up all persistent sessions.
-        """
+        """Clean up all persistent sessions."""
         for session_id in list(self.persistent_containers.keys()):
             self.cleanup_session(session_id)
 
@@ -255,7 +417,7 @@ class DockerManager:
                     return container.attrs["State"]["ExitCode"]
                 await asyncio.sleep(0.1)
             except Exception as e:
-                print(f"Error waiting for container {container_id}: {e}")
+                logger.error(f"Error waiting for container {container_id}: {e}")
                 # If the container is not found, it might have been removed
                 # This can happen if the container exits and is set to auto-remove
                 return 0  # Assume success if container is gone
@@ -291,6 +453,19 @@ print(f"Current directory: {{os.getcwd()}}")
 print(f"Directory contents: {{os.listdir('.')}}")
 print(f"Environment: {{os.environ}}")
 
+# Make sure state is serializable
+def ensure_serializable(obj):
+    \"\"\"Ensure all objects in state are JSON serializable.\"\"\"
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, (list, tuple)):
+        return [ensure_serializable(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {{k: ensure_serializable(v) for k, v in obj.items()}}
+    else:
+        # For non-serializable objects, convert to string representation
+        return str(obj)
+
 # Execute code with state dict as globals
 try:
     print("Executing code...")
@@ -299,9 +474,16 @@ try:
         exec({repr(code)}, exec_globals)
 
         # Update state with any new or modified variables
+        # Only keep serializable values
         for key, value in exec_globals.items():
             if key != 'state' and not key.startswith('__'):
-                state_dict[key] = value
+                try:
+                    # Test if value is JSON-serializable
+                    json.dumps(value)
+                    state_dict[key] = value
+                except (TypeError, OverflowError):
+                    # If not serializable, convert to string
+                    state_dict[key] = ensure_serializable(value)
 
         # Add stdout and stderr to state
         state_dict['__stdout__'] = stdout_capture.getvalue()
@@ -318,8 +500,11 @@ except Exception as e:
 # Save updated state
 print("Writing output to /app/output.json...")
 try:
+    # Make one final check to ensure everything is serializable
+    serializable_state = ensure_serializable(state_dict)
+
     with open('/app/output.json', 'w') as f:
-        json.dump(state_dict, f)
+        json.dump(serializable_state, f)
     print("Successfully wrote output state")
     # Verify file exists after writing
     print(f"File exists after writing: {{os.path.exists('/app/output.json')}}")
@@ -327,6 +512,18 @@ try:
 except Exception as e:
     error_with_traceback = f"{{e}}\\n{{traceback.format_exc()}}"
     print(f"Error writing output: {{error_with_traceback}}")
+    # Try to write at least a minimal output file
+    try:
+        minimal_state = {{
+            '__stdout__': stdout_capture.getvalue(),
+            '__stderr__': stderr_capture.getvalue(),
+            '__error__': f"Error serializing state: {{error_with_traceback}}"
+        }}
+        with open('/app/output.json', 'w') as f:
+            json.dump(minimal_state, f)
+        print("Wrote minimal output state with error message")
+    except Exception as nested_e:
+        print(f"Failed to write even minimal state: {{nested_e}}")
 
 # Print output summary
 print("=== EXECUTION RESULTS ===")

@@ -2,7 +2,7 @@
 
 docker:
   # Docker image to use for execution environments
-  image: python:3.12.2-slim
+  image: python-docker-mcp:latest
 
   # Working directory inside the container
   working_dir: /app
@@ -13,8 +13,8 @@ docker:
   timeout: 30  # seconds
 
   # Security settings
-  network_disabled: true
-  read_only: true
+  network_disabled: false
+  read_only: false
 
 package:
   # Package installer to use (uv or pip)
