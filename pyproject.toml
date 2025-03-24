@@ -1,25 +1,46 @@
 [project]
 name = "python-docker-mcp"
 version = "0.1.0"
-description = "Dockerised Python execution environment"
+description = "Dockerised Python execution environment for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
- "docker>=7.1.0",
- "mcp>=1.5.0",
- "pre-commit>=4.2.0",
- "pytest>=8.3.5",
- "pytest-asyncio>=0.25.3",
- "pytest-cov>=6.0.0",
- "pyyaml>=6.0.2",
- "setuptools>=77.0.3",
+license = {text = "MIT"}
+keywords = ["docker", "python", "execution", "sandbox", "agent", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Testing",
 ]
+dependencies = [
+    "docker>=7.1.0",
+    "mcp>=1.5.0",
+    "pyyaml>=6.0.2",
+    "setuptools>=77.0.3",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/artivus/python-docker-mcp"
+"Bug Tracker" = "https://github.com/artivus/python-docker-mcp/issues"
+
 [[project.authors]]
 name = "Shannon Sands"
 email = "shannon.sands.1979@gmail.com"
 
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.2.0",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.25.3",
+    "pytest-cov>=6.0.0",
+]
+
 [build-system]
-requires = [ "hatchling",]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
@@ -32,7 +53,9 @@ packages = ["src/python_docker_mcp"]
 include = [
     "src/python_docker_mcp/*.py",
     "src/python_docker_mcp/*.yaml",
+    "src/python_docker_mcp/Dockerfile",
     "README.md",
+    "LICENSE",
 ]
 
 [tool.pytest.ini_options]
