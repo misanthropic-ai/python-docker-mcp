@@ -85,7 +85,7 @@ class DockerManager:
                     cpu_quota=int(self.config.docker.cpu_limit * 100000),  # Docker CPU quota in microseconds
                     network_disabled=self.config.docker.network_disabled,
                     read_only=self.config.docker.read_only,
-                    remove=True,
+                    remove=False,  # Don't auto-remove the container
                     detach=True,
                     environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
                 )
@@ -131,6 +131,12 @@ class DockerManager:
                     except Exception:
                         pass
                     raise DockerExecutionError(f"Execution timed out after {self.config.docker.timeout} seconds")
+                finally:
+                    # Always clean up the container
+                    try:
+                        container.remove(force=True)
+                    except Exception as e:
+                        logger.warning(f"Error removing container {container.id}: {e}")
 
         except Exception as e:
             if not isinstance(e, DockerExecutionError):
