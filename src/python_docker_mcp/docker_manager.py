@@ -33,7 +33,6 @@ class DockerManager:
         if state is None:
             state = {}
 
-        # Create a wrapper script with proper output capture and state handling
         wrapped_code = f"""
 import json, sys, io
 from contextlib import redirect_stdout, redirect_stderr
@@ -76,8 +75,8 @@ print("---OUTPUT_END---")
 """
 
         try:
-            # Run container asynchronously with a timeout
-            container = self.client.containers.run(
+            # Run synchronously to avoid race condition
+            container_output = self.client.containers.run(
                 image=self.config.docker.image,
                 command=["python", "-c", wrapped_code],
                 mem_limit=self.config.docker.memory_limit,
@@ -85,16 +84,11 @@ print("---OUTPUT_END---")
                 network_disabled=self.config.docker.network_disabled,
                 read_only=True,
                 remove=True,
-                detach=True,  # Run in background
+                detach=False,  # Run synchronously
             )
 
-            # Wait for completion with a 30-second timeout
-            exit_code = await asyncio.wait_for(self._wait_for_container(container.id), timeout=30.0)
-            if exit_code != 0:
-                raise DockerExecutionError(f"Container exited with code {exit_code}")
-
-            # Get and parse the output
-            output = container.logs().decode("utf-8")
+            # Decode and parse the output
+            output = container_output.decode("utf-8")
             start_marker = "---OUTPUT_START---"
             end_marker = "---OUTPUT_END---"
 
@@ -106,9 +100,6 @@ print("---OUTPUT_END---")
                 return json.loads(json_str)
             return {"__stdout__": output, "__stderr__": "", "__error__": None, **state}
 
-        except asyncio.TimeoutError:
-            container.stop()
-            raise DockerExecutionError("Execution timed out after 30 seconds")
         except Exception as e:
             raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
 
