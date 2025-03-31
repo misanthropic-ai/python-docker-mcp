@@ -3,8 +3,6 @@
 import asyncio
 import json
 import logging
-import os
-import tempfile
 from typing import Any, Dict, Optional
 
 import docker
@@ -31,126 +29,88 @@ class DockerManager:
         self.persistent_containers: Dict[str, str] = {}  # session_id -> container_id
 
     async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute code in a new container that doesn't persist state.
-
-        Args:
-            code: The Python code to execute
-            state: Optional state dictionary to pass to the execution environment
-
-        Returns:
-            The updated state dictionary after execution
-        """
+        """Execute code in a new container that doesn't persist state."""
         if state is None:
             state = {}
 
-        # Ensure the state is serializable
-        def ensure_serializable(obj: Any) -> Any:
-            """Ensure all objects in state are JSON serializable."""
-            if isinstance(obj, (str, int, float, bool, type(None))):
-                return obj
-            elif isinstance(obj, (list, tuple)):
-                return [ensure_serializable(item) for item in obj]
-            elif isinstance(obj, dict):
-                return {k: ensure_serializable(v) for k, v in obj.items()}
-            else:
-                # For non-serializable objects, convert to string representation
-                return str(obj)
+        # Create a wrapper script with proper output capture and state handling
+        wrapped_code = f"""
+import json, sys, io
+from contextlib import redirect_stdout, redirect_stderr
 
-        # Make sure the state is fully serializable before starting
-        serializable_state = ensure_serializable(state)
+state = {json.dumps(state)}
+
+stdout_capture = io.StringIO()
+stderr_capture = io.StringIO()
+
+def ensure_serializable(obj):
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, (list, tuple)):
+        return [ensure_serializable(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {{k: ensure_serializable(v) for k, v in obj.items()}}
+    return str(obj)
+
+try:
+    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+        exec({repr(code)}, state)
+    result = ensure_serializable({{
+        "__stdout__": stdout_capture.getvalue(),
+        "__stderr__": stderr_capture.getvalue(),
+        "__error__": None,
+        **state
+    }})
+except Exception as e:
+    result = ensure_serializable({{
+        "__stdout__": stdout_capture.getvalue(),
+        "__stderr__": stderr_capture.getvalue(),
+        "__error__": str(e),
+        **state
+    }})
+
+result.pop('__builtins__', None)
+print("---OUTPUT_START---")
+print(json.dumps(result))
+print("---OUTPUT_END---")
+"""
 
         try:
-            # Create temporary directory to mount inside the container
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Create Python script file with the code
-                script_path = os.path.join(temp_dir, "script.py")
-                state_path = os.path.join(temp_dir, "state.json")
-                output_path = os.path.join(temp_dir, "output.json")
+            # Run container asynchronously with a timeout
+            container = self.client.containers.run(
+                image=self.config.docker.image,
+                command=["python", "-c", wrapped_code],
+                mem_limit=self.config.docker.memory_limit,
+                cpu_quota=int(self.config.docker.cpu_limit * 100000),
+                network_disabled=self.config.docker.network_disabled,
+                read_only=True,
+                remove=True,
+                detach=True,  # Run in background
+            )
 
-                # Create empty output file with correct permissions
-                with open(output_path, "w") as f:
-                    f.write("{}")  # Initialize with empty JSON object
-                os.chmod(output_path, 0o666)  # Readable and writable by all
+            # Wait for completion with a 30-second timeout
+            exit_code = await asyncio.wait_for(self._wait_for_container(container.id), timeout=30.0)
+            if exit_code != 0:
+                raise DockerExecutionError(f"Container exited with code {exit_code}")
 
-                # Write state to a JSON file
-                with open(state_path, "w") as f:
-                    json.dump(serializable_state, f)
+            # Get and parse the output
+            output = container.logs().decode("utf-8")
+            start_marker = "---OUTPUT_START---"
+            end_marker = "---OUTPUT_END---"
 
-                # Create a wrapper script that loads the state, executes the code, and saves the state
-                with open(script_path, "w") as f:
-                    f.write(self._create_wrapper_script(code))
+            start_idx = output.find(start_marker)
+            end_idx = output.rfind(end_marker)
 
-                # Set proper permissions for the files
-                os.chmod(script_path, 0o644)  # Readable by all, writable by owner
-                os.chmod(state_path, 0o644)
+            if start_idx >= 0 and end_idx >= 0:
+                json_str = output[start_idx + len(start_marker) : end_idx].strip()
+                return json.loads(json_str)
+            return {"__stdout__": output, "__stderr__": "", "__error__": None, **state}
 
-                # Run container with the script - ensure use of virtual environment
-                container = self.client.containers.run(
-                    image=self.config.docker.image,
-                    command=["python", "/app/script.py"],
-                    volumes={temp_dir: {"bind": "/app", "mode": "rw"}},
-                    working_dir=self.config.docker.working_dir,
-                    mem_limit=self.config.docker.memory_limit,
-                    cpu_quota=int(self.config.docker.cpu_limit * 100000),  # Docker CPU quota in microseconds
-                    network_disabled=self.config.docker.network_disabled,
-                    read_only=self.config.docker.read_only,
-                    remove=False,  # Don't auto-remove the container
-                    detach=True,
-                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
-                )
-
-                # Wait for the container to finish or timeout
-                try:
-                    exit_code = await asyncio.wait_for(
-                        self._wait_for_container(container.id),
-                        timeout=self.config.docker.timeout,
-                    )
-
-                    # Check if the container exited with an error
-                    if exit_code != 0:
-                        logs = container.logs().decode("utf-8")
-                        raise DockerExecutionError(f"Container exited with code {exit_code}: {logs}")
-
-                    # Load output state
-                    if os.path.exists(output_path):
-                        try:
-                            with open(output_path, "r") as f:
-                                output_content = f.read()
-                                try:
-                                    return json.loads(output_content)
-                                except json.JSONDecodeError as je:
-                                    # If there's a JSON parsing error, provide more context
-                                    logs = container.logs().decode("utf-8") if container else "No logs available"
-                                    raise DockerExecutionError(
-                                        f"JSON parse error at position {je.pos}: {je.msg}. "
-                                        f"Content: {output_content[:100]}{'...' if len(output_content) > 100 else ''} "
-                                        f"Logs: {logs}"
-                                    )
-                        except Exception as e:
-                            logs = container.logs().decode("utf-8") if container else "No logs available"
-                            raise DockerExecutionError(f"Error reading output file: {e}. Logs: {logs}")
-                    else:
-                        logs = container.logs().decode("utf-8") if container else "No logs available"
-                        raise DockerExecutionError(f"Execution failed to produce output state. Logs: {logs}")
-
-                except asyncio.TimeoutError:
-                    # Force stop the container if it times out
-                    try:
-                        container.stop(timeout=1)
-                    except Exception:
-                        pass
-                    raise DockerExecutionError(f"Execution timed out after {self.config.docker.timeout} seconds")
-                finally:
-                    # Always clean up the container
-                    try:
-                        container.remove(force=True)
-                    except Exception as e:
-                        logger.warning(f"Error removing container {container.id}: {e}")
-
+        except asyncio.TimeoutError:
+            container.stop()
+            raise DockerExecutionError("Execution timed out after 30 seconds")
         except Exception as e:
-            if not isinstance(e, DockerExecutionError):
-                raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
-            raise
+            raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
 
     async def execute_persistent(self, session_id: str, code: str) -> Dict[str, Any]:
         """Execute code in a persistent container that retains state between calls.
