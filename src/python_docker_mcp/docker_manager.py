@@ -75,6 +75,11 @@ class DockerManager:
                 with open(script_path, "w") as f:
                     f.write(self._create_wrapper_script(code))
 
+                # Set proper permissions for the files
+                os.chmod(script_path, 0o644)  # Readable by all, writable by owner
+                os.chmod(state_path, 0o644)
+                os.chmod(output_path, 0o666)  # Readable and writable by all (since container needs to write to it)
+
                 # Run container with the script - ensure use of virtual environment
                 container = self.client.containers.run(
                     image=self.config.docker.image,
