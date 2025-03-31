@@ -73,7 +73,7 @@ print("---OUTPUT_START---")
 print(json.dumps(result))
 print("---OUTPUT_END---")
 """
-
+        logger.info("Executing transient with detach=False")
         try:
             # Run synchronously to avoid race condition
             container_output = self.client.containers.run(
