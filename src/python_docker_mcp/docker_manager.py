@@ -67,6 +67,11 @@ class DockerManager:
                 state_path = os.path.join(temp_dir, "state.json")
                 output_path = os.path.join(temp_dir, "output.json")
 
+                # Create empty output file with correct permissions
+                with open(output_path, "w") as f:
+                    f.write("{}")  # Initialize with empty JSON object
+                os.chmod(output_path, 0o666)  # Readable and writable by all
+
                 # Write state to a JSON file
                 with open(state_path, "w") as f:
                     json.dump(serializable_state, f)
@@ -78,7 +83,6 @@ class DockerManager:
                 # Set proper permissions for the files
                 os.chmod(script_path, 0o644)  # Readable by all, writable by owner
                 os.chmod(state_path, 0o644)
-                os.chmod(output_path, 0o666)  # Readable and writable by all (since container needs to write to it)
 
                 # Run container with the script - ensure use of virtual environment
                 container = self.client.containers.run(
