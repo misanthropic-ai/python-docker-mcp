@@ -1,8 +1,5 @@
 FROM python:3.12.2-slim
 
-# Install uv for package management
-RUN pip install uv
-
 # Set up working directory
 WORKDIR /app
 
@@ -14,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install commonly used packages globally
-RUN uv pip install --system numpy pandas scipy matplotlib scikit-learn sympy
+RUN pip install --no-cache-dir numpy pandas scipy matplotlib scikit-learn sympy
 
 # Set Python to not write bytecode and to flush stdout/stderr immediately
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -32,12 +29,24 @@ RUN mkdir -p /home/appuser/.venv && \
 # Give appuser write permissions to the /app directory
 RUN mkdir -p /app && chown -R appuser:appuser /app
 
+# Create a script to fix permissions on mounted volumes
+RUN echo '#!/bin/bash\n\
+if [ -d "/app" ]; then\n\
+    chown -R appuser:appuser /app\n\
+    chmod -R 755 /app\n\
+fi\n\
+exec "$@"' > /usr/local/bin/docker-entrypoint.sh && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Switch to appuser
 USER appuser
 
 # Set up the virtual environment in the user's PATH
 ENV PATH="/home/appuser/.venv/bin:$PATH" \
     VIRTUAL_ENV="/home/appuser/.venv"
+
+# Set the entrypoint
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default command (will be overridden when running the container)
 CMD ["python", "-c", "import time; time.sleep(86400)"]
