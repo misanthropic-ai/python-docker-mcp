@@ -9,7 +9,7 @@ import json
 import logging
 import sys
 import uuid
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import mcp.server.stdio
 import mcp.types as types
@@ -19,17 +19,50 @@ from pydantic import AnyUrl
 
 from .docker_manager import DockerManager
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("python-docker-mcp")
+
 # Initialize the Docker manager
 docker_manager = DockerManager()
 
 # Store sessions for persistent code execution environments
 sessions = {}
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("python-docker-mcp")
-
+# Server instance
 server = Server("python-docker-mcp")
+
+# Flag to track if pool initialization has been scheduled
+pool_initialization_scheduled = False
+
+
+@server.shutdown()
+async def handle_shutdown() -> None:
+    """Handle server shutdown."""
+    logger.info("Server shutdown handler called")
+
+    # Clean up container pool
+    if docker_manager.pool_enabled:
+        try:
+            await docker_manager.cleanup_pool()
+        except Exception as e:
+            logger.error(f"Error cleaning up container pool during shutdown: {e}")
+
+
+@server.initialize()
+async def handle_initialize(options: InitializationOptions) -> AsyncGenerator[list[types.TextContent | types.ImageContent | types.EmbeddedResource], None]:
+    """Handle client initialization."""
+    # Initialize container pool in the background
+    global pool_initialization_scheduled
+
+    if not pool_initialization_scheduled and docker_manager.pool_enabled:
+        pool_initialization_scheduled = True
+        logger.info("Scheduling container pool initialization")
+        # Schedule pool initialization to run in the background
+        asyncio.create_task(docker_manager.initialize_pool())
+
+    yield types.TextContent(type="text", text="Python Docker MCP initialized")
+    await asyncio.sleep(0.1)
 
 
 @server.list_resources()
@@ -131,7 +164,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
     if not arguments:
         raise ValueError("Missing arguments")
 
-    if name == "execute-transient":
+    if name == "execute-lean":
         code = arguments.get("code")
         state = arguments.get("state", {})
 
@@ -146,7 +179,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         # Return both the output and the state for client use
         return [types.TextContent(type="text", text=f"{formatted_text}\n\nState: {json.dumps(result, default=str)}")]
 
-    elif name == "execute-persistent":
+    elif name == "execute-lean-persistent":
         code = arguments.get("code")
         session_id = arguments.get("session_id")
 
@@ -270,5 +303,16 @@ async def main() -> None:
             )
     finally:
         # Clean up any remaining sessions when the server shuts down
-        logger.info("Cleaning up sessions")
+        logger.info("Cleaning up sessions and container pool")
         docker_manager.cleanup_all_sessions()
+
+        # Clean up container pool
+        if docker_manager.pool_enabled:
+            try:
+                # Create and run a new event loop for synchronous cleanup
+                cleanup_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(cleanup_loop)
+                cleanup_loop.run_until_complete(docker_manager.cleanup_pool())
+                cleanup_loop.close()
+            except Exception as e:
+                logger.error(f"Error cleaning up container pool: {e}")

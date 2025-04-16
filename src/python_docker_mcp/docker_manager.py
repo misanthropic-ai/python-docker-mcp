@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional, Set
 
 import docker
 
@@ -28,11 +29,266 @@ class DockerManager:
         self.client = docker.from_env()
         self.persistent_containers: Dict[str, str] = {}  # session_id -> container_id
 
+        # Container pooling functionality
+        self.container_pool: List[str] = []  # List of available container IDs
+        self.in_use_containers: Set[str] = set()  # Set of container IDs currently in use
+        self.pool_lock = asyncio.Lock()  # Lock for thread safety when accessing the pool
+        self.container_creation_timestamps: Dict[str, float] = {}  # container_id -> creation_timestamp
+
+        # Pool configuration
+        try:
+            self.pool_size = self.config.docker.pool_size
+            self.pool_max_age = self.config.docker.pool_max_age
+            self.max_concurrent_creations = self.config.docker.max_concurrent_creations
+            self.pool_enabled = self.config.docker.pool_enabled
+
+            # Disable pooling for now until we can verify basic functionality
+            try:
+                logger.info("Container pooling configuration loaded")
+                logger.info(f"Pool size: {self.pool_size}, Max age: {self.pool_max_age}s, " f"Max concurrent creations: {self.max_concurrent_creations}")
+            except Exception as e:
+                logger.error(f"Error configuring container pooling: {e}")
+        except AttributeError:
+            # If we hit any AttributeError, disable pooling
+            logger.warning("Error accessing pooling configuration attributes, disabling container pooling")
+            self.pool_size = 0
+            self.pool_max_age = 300
+            self.max_concurrent_creations = 5
+            self.pool_enabled = False
+
+        # Container acquisition semaphore to limit concurrent container creations
+        self.container_semaphore = asyncio.Semaphore(self.max_concurrent_creations)
+
+    async def initialize_pool(self) -> None:
+        """Initialize the container pool with preloaded containers."""
+        if not self.pool_enabled:
+            logger.info("Container pooling is disabled, skipping pool initialization")
+            return
+
+        logger.info(f"Initializing container pool with size {self.pool_size}")
+
+        async with self.pool_lock:
+            tasks = []
+            for _ in range(min(self.pool_size, self.max_concurrent_creations)):
+                tasks.append(self._create_pooled_container())
+
+            if tasks:
+                results: list[str | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
+                # Filter out exceptions and add only successful container creations to the pool
+                for result in results:
+                    if isinstance(result, str) and result:  # Ensure result is a non-empty string
+                        self.container_pool.append(result)
+                        self.container_creation_timestamps[result] = time.time()
+
+            logger.info(f"Container pool initialized with {len(self.container_pool)} containers")
+
+    async def _create_pooled_container(self) -> str:
+        """Create a new container for the pool."""
+        try:
+            async with self.container_semaphore:
+                # Create a container in a paused state that we can use later
+                container = self.client.containers.run(
+                    image=self.config.docker.image,
+                    command=["sleep", "3600"],  # Sleep for 1 hour
+                    detach=True,
+                    mem_limit=self.config.docker.memory_limit,
+                    cpu_quota=int(self.config.docker.cpu_limit * 100000),
+                    network_disabled=self.config.docker.network_disabled,
+                    read_only=False,  # Need to be writable for Python code execution
+                    labels={"python_docker_mcp.pooled": "true", "python_docker_mcp.created": str(time.time())},
+                )
+                logger.info(f"Created pooled container {container.id[:12]}")
+                return container.id
+        except Exception as e:
+            logger.error(f"Error creating pooled container: {str(e)}")
+            raise DockerExecutionError(f"Failed to create container for pool: {str(e)}")
+
+    async def _get_container_from_pool(self) -> str:
+        """Get a container from the pool or create a new one if needed."""
+        container_id = None
+
+        async with self.pool_lock:
+            # Clean up old containers in the pool
+            current_time = time.time()
+            removed_count = 0
+
+            for container_id in list(self.container_pool):
+                if container_id in self.container_creation_timestamps:
+                    age = current_time - self.container_creation_timestamps[container_id]
+                    if age > self.pool_max_age:
+                        self.container_pool.remove(container_id)
+                        try:
+                            container = self.client.containers.get(container_id)
+                            container.remove(force=True)
+                            del self.container_creation_timestamps[container_id]
+                            removed_count += 1
+                        except Exception as e:
+                            logger.warning(f"Error removing old container {container_id[:12]}: {str(e)}")
+
+            if removed_count > 0:
+                logger.info(f"Removed {removed_count} aged-out containers from pool")
+
+            # Get a container from the pool
+            if self.container_pool:
+                container_id = self.container_pool.pop()
+                self.in_use_containers.add(container_id)
+
+        # If no container available in pool, create a new one
+        if not container_id:
+            logger.info("No containers available in pool, creating new one")
+            container_id = await self._create_pooled_container()
+            async with self.pool_lock:
+                self.in_use_containers.add(container_id)
+                self.container_creation_timestamps[container_id] = time.time()
+
+        return container_id
+
+    async def _return_container_to_pool(self, container_id: str) -> None:
+        """Return a container to the pool for reuse or clean it up if the pool is full."""
+        async with self.pool_lock:
+            # Remove from in-use set
+            if container_id in self.in_use_containers:
+                self.in_use_containers.remove(container_id)
+
+            try:
+                # Check container still exists and is healthy
+                container = self.client.containers.get(container_id)
+
+                # Reset container state to ensure isolation between executions
+                try:
+                    # Kill any running processes
+                    container.exec_run("pkill -9 python", user="root")
+                    # Clean up /app directory
+                    container.exec_run("rm -rf /app/*", user="root")
+                except Exception as e:
+                    logger.warning(f"Error resetting container state: {str(e)}")
+
+                # If pool isn't full, add it back to the pool
+                if len(self.container_pool) < self.pool_size:
+                    self.container_pool.append(container_id)
+                    # Reset the creation timestamp to extend lifetime
+                    self.container_creation_timestamps[container_id] = time.time()
+                    logger.debug(f"Returned container {container_id[:12]} to pool")
+                else:
+                    # Pool is full, remove this container
+                    container.remove(force=True)
+                    if container_id in self.container_creation_timestamps:
+                        del self.container_creation_timestamps[container_id]
+                    logger.debug(f"Pool is full, removed container {container_id[:12]}")
+            except Exception as e:
+                logger.warning(f"Error returning container {container_id[:12]} to pool: {str(e)}")
+                # Try to force remove if there's an issue
+                try:
+                    self.client.containers.get(container_id).remove(force=True)
+                except Exception:
+                    pass
+
+                if container_id in self.container_creation_timestamps:
+                    del self.container_creation_timestamps[container_id]
+
     async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Execute code in a new container that doesn't persist state."""
         if state is None:
             state = {}
 
+        # Check if pooling is enabled and use the pooled version if it is
+        if self.pool_enabled:
+            try:
+                return await self._execute_transient_pooled(code, state)
+            except Exception as e:
+                logger.warning(f"Pooled execution failed: {str(e)}, falling back to standard execution")
+                # Fall back to standard execution if pooled execution fails
+
+        # Standard execution (non-pooled)
+        return await self._execute_transient_standard(code, state)
+
+    async def _execute_transient_pooled(self, code: str, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute code using a container from the pool."""
+        container_id = None
+        try:
+            # Get a container from the pool
+            container_id = await self._get_container_from_pool()
+            container = self.client.containers.get(container_id)
+
+            # Create the Python script with the code and state
+            wrapped_code = f"""
+import json, sys, io
+from contextlib import redirect_stdout, redirect_stderr
+
+state = {json.dumps(state)}
+
+stdout_capture = io.StringIO()
+stderr_capture = io.StringIO()
+
+def ensure_serializable(obj):
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, (list, tuple)):
+        return [ensure_serializable(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {{k: ensure_serializable(v) for k, v in obj.items()}}
+    return str(obj)
+
+try:
+    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+        exec({repr(code)}, state)
+    result = ensure_serializable({{
+        "__stdout__": stdout_capture.getvalue(),
+        "__stderr__": stderr_capture.getvalue(),
+        "__error__": None,
+        **state
+    }})
+except Exception as e:
+    result = ensure_serializable({{
+        "__stdout__": stdout_capture.getvalue(),
+        "__stderr__": stderr_capture.getvalue(),
+        "__error__": str(e),
+        **state
+    }})
+
+result.pop('__builtins__', None)
+print("---OUTPUT_START---")
+print(json.dumps(result))
+print("---OUTPUT_END---")
+"""
+
+            # Write the script to the container
+            escaped_code = wrapped_code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+            write_cmd = f'echo "{escaped_code}" > /app/execute_script.py'
+
+            exec_result = container.exec_run(cmd=["bash", "-c", write_cmd], workdir=self.config.docker.working_dir)
+
+            if exec_result.exit_code != 0:
+                raise DockerExecutionError(f"Failed to create script in container: {exec_result.output.decode('utf-8')}")
+
+            # Execute the script
+            exec_result = container.exec_run(cmd=["python", "/app/execute_script.py"], workdir=self.config.docker.working_dir)
+
+            # Parse the output
+            output = exec_result.output.decode("utf-8")
+            start_marker = "---OUTPUT_START---"
+            end_marker = "---OUTPUT_END---"
+
+            start_idx = output.find(start_marker)
+            end_idx = output.rfind(end_marker)
+
+            if start_idx >= 0 and end_idx >= 0:
+                json_str = output[start_idx + len(start_marker) : end_idx].strip()
+                return json.loads(json_str)
+
+            # If output parsing fails, return a simple result
+            return {"__stdout__": output, "__stderr__": "", "__error__": None, **state}
+
+        except Exception as e:
+            raise DockerExecutionError(f"Error executing code in pooled container: {str(e)}")
+
+        finally:
+            # Return the container to the pool if we got one
+            if container_id:
+                await self._return_container_to_pool(container_id)
+
+    async def _execute_transient_standard(self, code: str, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute code in a new container without using the pool."""
         wrapped_code = f"""
 import json, sys, io
 from contextlib import redirect_stdout, redirect_stderr
@@ -394,6 +650,42 @@ print("---OUTPUT_END---")
         """Clean up all persistent sessions."""
         for session_id in list(self.persistent_containers.keys()):
             self.cleanup_session(session_id)
+
+    async def cleanup_pool(self) -> None:
+        """Clean up all containers in the pool."""
+        if not self.pool_enabled:
+            return
+
+        logger.info("Cleaning up container pool")
+        async with self.pool_lock:
+            # Clean up containers in the pool
+            for container_id in list(self.container_pool):
+                try:
+                    container = self.client.containers.get(container_id)
+                    logger.info(f"Removing pooled container {container_id[:12]}")
+                    container.remove(force=True)
+                except Exception as e:
+                    logger.warning(f"Error removing container {container_id[:12]}: {str(e)}")
+
+            # Clean up containers that are in use but not in sessions
+            for container_id in list(self.in_use_containers):
+                try:
+                    # Skip containers that are part of a session
+                    if container_id in self.persistent_containers.values():
+                        continue
+
+                    container = self.client.containers.get(container_id)
+                    logger.info(f"Removing in-use container {container_id[:12]}")
+                    container.remove(force=True)
+                except Exception as e:
+                    logger.warning(f"Error removing container {container_id[:12]}: {str(e)}")
+
+            # Clear pool data structures
+            self.container_pool.clear()
+            self.in_use_containers.clear()
+            self.container_creation_timestamps.clear()
+
+        logger.info("Container pool cleanup complete")
 
     async def _wait_for_container(self, container_id: str) -> int:
         """Wait for a container to finish and return its exit code."""

@@ -16,6 +16,12 @@ docker:
   network_disabled: false
   read_only: false
 
+  # Container pooling settings
+  pool_enabled: true
+  pool_size: 32
+  pool_max_age: 300  # 5 minutes in seconds
+  max_concurrent_creations: 5
+
 package:
   # Package installer to use (uv or pip)
   installer: uv

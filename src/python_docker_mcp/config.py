@@ -19,6 +19,11 @@ class DockerConfig:
     timeout: int = 30  # seconds
     network_disabled: bool = True
     read_only: bool = True
+    # Container pooling settings
+    pool_enabled: bool = True  # Set to True to enable container pooling
+    pool_size: int = 32  # Maximum number of containers in the pool
+    pool_max_age: int = 300  # Maximum container lifetime in seconds (5 minutes)
+    max_concurrent_creations: int = 5  # Limit concurrent container creation
 
 
 @dataclass
