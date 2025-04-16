@@ -5,11 +5,11 @@ and dispatches them to the Docker execution environment.
 """
 
 import asyncio
-import json
 import logging
+import os
 import sys
 import uuid
-from typing import AsyncGenerator, Optional
+from typing import Any, Dict, List, Optional
 
 import mcp.server.stdio
 import mcp.types as types
@@ -17,52 +17,24 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
 
+from .config import load_config
 from .docker_manager import DockerManager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("python-docker-mcp")
 
+# Initialize the configuration
+config = load_config()
+
 # Initialize the Docker manager
-docker_manager = DockerManager()
+docker_manager = DockerManager(config)
 
 # Store sessions for persistent code execution environments
 sessions = {}
 
-# Server instance
+# Create the MCP server
 server = Server("python-docker-mcp")
-
-# Flag to track if pool initialization has been scheduled
-pool_initialization_scheduled = False
-
-
-@server.shutdown()
-async def handle_shutdown() -> None:
-    """Handle server shutdown."""
-    logger.info("Server shutdown handler called")
-
-    # Clean up container pool
-    if docker_manager.pool_enabled:
-        try:
-            await docker_manager.cleanup_pool()
-        except Exception as e:
-            logger.error(f"Error cleaning up container pool during shutdown: {e}")
-
-
-@server.initialize()
-async def handle_initialize(options: InitializationOptions) -> AsyncGenerator[list[types.TextContent | types.ImageContent | types.EmbeddedResource], None]:
-    """Handle client initialization."""
-    # Initialize container pool in the background
-    global pool_initialization_scheduled
-
-    if not pool_initialization_scheduled and docker_manager.pool_enabled:
-        pool_initialization_scheduled = True
-        logger.info("Scheduling container pool initialization")
-        # Schedule pool initialization to run in the background
-        asyncio.create_task(docker_manager.initialize_pool())
-
-    yield types.TextContent(type="text", text="Python Docker MCP initialized")
-    await asyncio.sleep(0.1)
 
 
 @server.list_resources()
@@ -156,6 +128,20 @@ async def handle_list_tools() -> list[types.Tool]:
     ]
 
 
+def _format_execution_result(result: Dict[str, Any]) -> str:
+    """Format the execution result for the MCP response."""
+    if result.get("status") == "error":
+        error = result.get("error", "Unknown error occurred")
+        error_info = result.get("error_info", {})
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+
+        return f"Error: {error}\nError Info: {error_info}\nOutput: {stdout}\nError Output: {stderr}"
+
+    # For successful execution, return the output
+    return result.get("stdout", "")
+
+
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Handle tool execution requests for Python code execution and package management."""
@@ -164,131 +150,96 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
     if not arguments:
         raise ValueError("Missing arguments")
 
-    if name == "execute-lean":
-        code = arguments.get("code")
-        state = arguments.get("state", {})
+    try:
+        if name == "execute-transient":
+            code = arguments.get("code")
+            state = arguments.get("state", {})
 
-        if not code:
-            raise ValueError("Missing code")
+            if not code:
+                raise ValueError("Missing code")
 
-        result = await docker_manager.execute_transient(code, state)
+            result = await docker_manager.execute_transient(code, state)
+            output = _format_execution_result(result)
+            return [types.TextContent(type="text", text=output)]
 
-        # Format text result, but also include state in the response
-        formatted_text = _format_execution_result(result)
+        elif name == "execute-persistent":
+            code = arguments.get("code")
+            session_id = arguments.get("session_id")
 
-        # Return both the output and the state for client use
-        return [types.TextContent(type="text", text=f"{formatted_text}\n\nState: {json.dumps(result, default=str)}")]
+            if not code:
+                raise ValueError("Missing code")
 
-    elif name == "execute-lean-persistent":
-        code = arguments.get("code")
-        session_id = arguments.get("session_id")
+            # Create a new session if not provided
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
 
-        if not code:
-            raise ValueError("Missing code")
+            result = await docker_manager.execute_persistent(session_id, code)
+            output = _format_execution_result(result)
+            return [types.TextContent(type="text", text=output)]
 
-        # Create a new session if not provided
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
+        elif name == "install-package":
+            package_name = arguments.get("package_name")
+            session_id = arguments.get("session_id")
 
-        result = await docker_manager.execute_persistent(session_id, code)
+            if not package_name:
+                raise ValueError("Missing package name")
 
-        # Format text result including state
-        formatted_text = _format_execution_result(result, session_id)
+            output = await docker_manager.install_package(session_id, package_name)
+            return [types.TextContent(type="text", text=f"Package installation result:\n\n{output}")]
 
-        # Include the state dictionary in the response if available
-        state_dict = result.get("state", {})
+        elif name == "cleanup-session":
+            session_id = arguments.get("session_id")
 
-        return [types.TextContent(type="text", text=f"{formatted_text}\n\nState: {json.dumps(state_dict, default=str)}")]
+            if not session_id:
+                raise ValueError("Missing session ID")
 
-    elif name == "install-package":
-        package_name = arguments.get("package_name")
-        session_id = arguments.get("session_id")
+            result = await docker_manager.cleanup_session(session_id)
 
-        if not package_name:
-            raise ValueError("Missing package name")
+            if session_id in sessions:
+                del sessions[session_id]
 
-        output = await docker_manager.install_package(session_id, package_name)
+            return [types.TextContent(type="text", text=f"Session {session_id} cleaned up successfully")]
 
-        return [
-            types.TextContent(
-                type="text",
-                text=f"Package installation result:\n\n{output}",
-            )
-        ]
-
-    elif name == "cleanup-session":
-        session_id = arguments.get("session_id")
-
-        if not session_id:
-            raise ValueError("Missing session ID")
-
-        docker_manager.cleanup_session(session_id)
-
-        if session_id in sessions:
-            del sessions[session_id]
-
-        return [
-            types.TextContent(
-                type="text",
-                text=f"Session {session_id} cleaned up successfully",
-            )
-        ]
-
-    else:
-        raise ValueError(f"Unknown tool: {name}")
-
-
-def _format_execution_result(result: dict, session_id: Optional[str] = None) -> str:
-    """Format execution result for display."""
-    if "__stdout__" in result and "__stderr__" in result and "__error__" in result:
-        # Transient execution result
-        output = result.get("__stdout__", "")
-        error = result.get("__error__")
-        stderr = result.get("__stderr__", "")
-
-        if error:
-            error_text = f"\n\nError: {error}"
         else:
-            error_text = ""
+            raise ValueError(f"Unknown tool: {name}")
+    except Exception as e:
+        logger.error(f"Error executing tool {name}: {str(e)}")
+        import traceback
 
-        if stderr and not error:
-            stderr_text = f"\n\nStandard Error:\n{stderr}"
-        else:
-            stderr_text = ""
+        logger.error(traceback.format_exc())
 
-        session_text = f"Session ID: {session_id}\n\n" if session_id else ""
-
-        return f"{session_text}Execution Result:\n\n{output}{stderr_text}{error_text}"
-    else:
-        # Persistent execution result
-        output = result.get("output", "")
-        error = result.get("error")
-
-        if error:
-            error_text = f"\n\nError: {error}"
-        else:
-            error_text = ""
-
-        session_text = f"Session ID: {session_id}\n\n" if session_id else ""
-
-        return f"{session_text}Execution Result:\n\n{output}{error_text}"
+        # Return a properly formatted error response
+        error_message = f"Error executing {name}: {str(e)}"
+        return [types.TextContent(type="text", text=error_message)]
 
 
 async def main() -> None:
-    """Start the MCP server.
+    """Start the MCP server."""
+    # Configure logging based on debug flag from command line or environment
+    debug_mode = "--debug" in sys.argv or os.environ.get("PYTHON_DOCKER_MCP_DEBUG", "").lower() in ["true", "1", "yes"]
 
-    This function initializes and runs the MCP server that handles code execution
-    requests and communicates with the Docker manager.
-    """
-    if "--debug" in sys.argv:
+    if debug_mode:
         logging.basicConfig(level=logging.DEBUG)
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
+    else:
+        # Set info level logging by default for better diagnostics
+        logging.basicConfig(level=logging.INFO)
+
+    # Disable pooling for now until we can verify basic functionality
+    try:
+        logger.info("Temporarily disabling container pooling for stability")
+        if hasattr(config.docker, "pool_enabled"):
+            config.docker.pool_enabled = False
+    except Exception as e:
+        logger.error(f"Error configuring container pooling: {e}")
 
     # Run the server using stdin/stdout streams
+    logger.info("Starting MCP server using stdio transport")
     try:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            logger.info("stdio server initialized, running MCP server")
             await server.run(
                 read_stream,
                 write_stream,
@@ -301,18 +252,24 @@ async def main() -> None:
                     ),
                 ),
             )
+    except Exception as e:
+        logger.error(f"Error running MCP server: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+        raise
     finally:
         # Clean up any remaining sessions when the server shuts down
-        logger.info("Cleaning up sessions and container pool")
-        docker_manager.cleanup_all_sessions()
-
-        # Clean up container pool
-        if docker_manager.pool_enabled:
+        logger.info("Cleaning up sessions")
+        for session_id in list(sessions.keys()):
             try:
-                # Create and run a new event loop for synchronous cleanup
-                cleanup_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(cleanup_loop)
-                cleanup_loop.run_until_complete(docker_manager.cleanup_pool())
-                cleanup_loop.close()
+                await docker_manager.cleanup_session(session_id)
             except Exception as e:
-                logger.error(f"Error cleaning up container pool: {e}")
+                logger.error(f"Error cleaning up session {session_id}: {e}")
+
+        logger.info("Server shutdown complete")
+
+
+# If this module is run directly, start the server
+if __name__ == "__main__":
+    asyncio.run(main())

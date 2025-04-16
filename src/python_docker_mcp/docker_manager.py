@@ -1,12 +1,15 @@
 """Module for managing Docker containers to execute Python code securely."""
 
 import asyncio
-import json
 import logging
+import os
+import re
+import tempfile
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import docker
+from docker.errors import NotFound
 
 from .config import Configuration, load_config
 
@@ -20,34 +23,168 @@ class DockerExecutionError(Exception):
     pass
 
 
+class PythonValidationError(Exception):
+    """Exception raised when Python code validation fails."""
+
+    pass
+
+
+class PythonExecutionError(Exception):
+    """Exception raised when Python code fails to execute.
+
+    This provides more structured information about Python-specific errors.
+    """
+
+    def __init__(self, message: str, error_type: str = "unknown", line: Optional[int] = None, column: Optional[int] = None):
+        """Initialize the error.
+
+        Args:
+            message: The error message
+            error_type: The type of Python error (e.g., "syntax_error", "runtime_error")
+            line: Optional line number where the error occurred
+            column: Optional column number where the error occurred
+        """
+        self.error_type = error_type
+        self.line = line
+        self.column = column
+        self.message = message
+        super().__init__(message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the error to a dictionary for JSON serialization."""
+        return {
+            "error_type": self.error_type,
+            "message": self.message,
+            "line": self.line,
+            "column": self.column,
+        }
+
+
+class PythonCodeValidator:
+    """Validates Python code for security and safety."""
+
+    def __init__(self, config: Configuration):
+        """Initialize the validator with configuration.
+
+        Args:
+            config: The configuration for validation
+        """
+        self.config = config
+        self._compile_regex_patterns()
+
+    def _compile_regex_patterns(self) -> None:
+        """Compile regex patterns for detecting unsafe imports and operations."""
+        # Build regex patterns for allowed and blocked imports
+        # allowed_patterns = [re.escape(imp) for imp in self.config.allowed_modules]
+        # blocked_patterns = [re.escape(imp) for imp in self.config.blocked_modules]
+
+        # Pattern for finding all imports
+        self.import_pattern = re.compile(r"import\s+([A-Za-z0-9_.]+)")
+
+        # Pattern for finding potentially unsafe operations
+        self.unsafe_pattern = re.compile(r"(os\.|subprocess\.|shutil\.|pathlib\.)")
+
+    def validate(self, code: str) -> Tuple[bool, Optional[str]]:
+        """Validate Python code for safety.
+
+        Args:
+            code: The Python code to validate
+
+        Returns:
+            A tuple of (is_valid, error_message)
+        """
+        # Find all imports in the code
+        imports = self.import_pattern.findall(code)
+
+        # Check for blocked imports
+        for import_name in imports:
+            if import_name in self.config.blocked_modules:
+                return False, f"Import '{import_name}' is blocked for security reasons"
+
+        # Check if all imports are in the allowed list
+        if self.config.allowed_modules:
+            for import_name in imports:
+                if import_name not in self.config.allowed_modules:
+                    return False, f"Import '{import_name}' is not in the allowed list"
+
+        # Check for potentially unsafe operations
+        if self.unsafe_pattern.search(code):
+            return False, "Potentially unsafe operation detected"
+
+        return True, None
+
+    def parse_python_error(self, output: str) -> Optional[PythonExecutionError]:
+        """Parse Python execution error output and convert to structured error.
+
+        Args:
+            output: The error output from Python
+
+        Returns:
+            A PythonExecutionError or None if no error could be parsed
+        """
+        if not output or "error:" not in output.lower():
+            return None
+
+        # Common Python error patterns
+        # Example: File "script.py", line 10, in <module>
+        error_pattern = re.compile(r'File\s+"[^"]+",\s+line\s+(\d+),\s+in\s+<module>')
+
+        for line in output.splitlines():
+            match = error_pattern.match(line)
+            if match:
+                line_num = int(match.group(1))
+
+                # Determine error type based on message content
+                error_type = "unknown"
+                if "SyntaxError" in output:
+                    error_type = "syntax_error"
+                elif "NameError" in output:
+                    error_type = "name_error"
+                elif "TypeError" in output:
+                    error_type = "type_error"
+                elif "ImportError" in output:
+                    error_type = "import_error"
+                elif "RuntimeError" in output:
+                    error_type = "runtime_error"
+
+                return PythonExecutionError(message=output.split("\n")[-1].strip(), error_type=error_type, line=line_num)
+
+        # If we couldn't parse a specific error, return a generic one
+        return PythonExecutionError(message="Python execution error: " + output.split("\n")[0], error_type="execution_error")
+
+
 class DockerManager:
     """Manages Docker containers for executing Python code."""
 
     def __init__(self, config: Optional[Configuration] = None):
         """Initialize the Docker manager with the given configuration."""
         self.config = config or load_config()
-        self.client = docker.from_env()
+        self.docker_available = False
+
+        # Handle the case where Docker is not available gracefully
+        try:
+            self.client = docker.from_env()
+            self.docker_available = True
+            logger.info("Docker connection established successfully")
+        except Exception as e:
+            logger.error(f"Docker is not available: {e}")
+            logger.warning("Running with Docker unavailable - tool calls will return errors")
+            self.client = None
+
         self.persistent_containers: Dict[str, str] = {}  # session_id -> container_id
+        self.validator = PythonCodeValidator(self.config)
 
         # Container pooling functionality
         self.container_pool: List[str] = []  # List of available container IDs
         self.in_use_containers: Set[str] = set()  # Set of container IDs currently in use
         self.pool_lock = asyncio.Lock()  # Lock for thread safety when accessing the pool
-        self.container_creation_timestamps: Dict[str, float] = {}  # container_id -> creation_timestamp
 
-        # Pool configuration
+        # Pool configuration - add reasonable defaults if not in config
         try:
-            self.pool_size = self.config.docker.pool_size
-            self.pool_max_age = self.config.docker.pool_max_age
-            self.max_concurrent_creations = self.config.docker.max_concurrent_creations
-            self.pool_enabled = self.config.docker.pool_enabled
-
-            # Disable pooling for now until we can verify basic functionality
-            try:
-                logger.info("Container pooling configuration loaded")
-                logger.info(f"Pool size: {self.pool_size}, Max age: {self.pool_max_age}s, " f"Max concurrent creations: {self.max_concurrent_creations}")
-            except Exception as e:
-                logger.error(f"Error configuring container pooling: {e}")
+            self.pool_size = getattr(self.config.docker, "pool_size", 32)
+            self.pool_max_age = getattr(self.config.docker, "pool_max_age", 300)  # 5 minutes
+            self.max_concurrent_creations = getattr(self.config.docker, "max_concurrent_creations", 5)
+            self.pool_enabled = getattr(self.config.docker, "pool_enabled", True)
         except AttributeError:
             # If we hit any AttributeError, disable pooling
             logger.warning("Error accessing pooling configuration attributes, disabling container pooling")
@@ -56,31 +193,46 @@ class DockerManager:
             self.max_concurrent_creations = 5
             self.pool_enabled = False
 
+        self.container_creation_timestamps: Dict[str, float] = {}  # container_id -> creation_timestamp
+
         # Container acquisition semaphore to limit concurrent container creations
         self.container_semaphore = asyncio.Semaphore(self.max_concurrent_creations)
 
     async def initialize_pool(self) -> None:
-        """Initialize the container pool with preloaded containers."""
+        """Initialize the container pool."""
         if not self.pool_enabled:
-            logger.info("Container pooling is disabled, skipping pool initialization")
+            logger.info("Container pooling is disabled, skipping initialization")
             return
 
         logger.info(f"Initializing container pool with size {self.pool_size}")
 
         async with self.pool_lock:
+            # Clear any existing pool state
+            self.container_pool.clear()
+            self.in_use_containers.clear()
+            self.container_creation_timestamps.clear()
+
+            # Create initial pool containers
             tasks = []
-            for _ in range(min(self.pool_size, self.max_concurrent_creations)):
+            for _ in range(self.pool_size):
                 tasks.append(self._create_pooled_container())
 
             if tasks:
-                results: list[str | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
-                # Filter out exceptions and add only successful container creations to the pool
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                successful_creations = 0
+
                 for result in results:
-                    if isinstance(result, str) and result:  # Ensure result is a non-empty string
+                    if isinstance(result, Exception):
+                        logger.error(f"Error creating pooled container: {str(result)}")
+                    elif result:
                         self.container_pool.append(result)
                         self.container_creation_timestamps[result] = time.time()
+                        successful_creations += 1
 
-            logger.info(f"Container pool initialized with {len(self.container_pool)} containers")
+                logger.info(f"Container pool initialized with {successful_creations} containers")
+
+                if successful_creations < self.pool_size:
+                    logger.warning(f"Only created {successful_creations} out of {self.pool_size} requested containers")
 
     async def _create_pooled_container(self) -> str:
         """Create a new container for the pool."""
@@ -94,10 +246,10 @@ class DockerManager:
                     mem_limit=self.config.docker.memory_limit,
                     cpu_quota=int(self.config.docker.cpu_limit * 100000),
                     network_disabled=self.config.docker.network_disabled,
-                    read_only=False,  # Need to be writable for Python code execution
+                    read_only=False,  # Allow writing to /app
                     labels={"python_docker_mcp.pooled": "true", "python_docker_mcp.created": str(time.time())},
                 )
-                logger.info(f"Created pooled container {container.id[:12]}")
+                logger.debug(f"Created pooled container {container.id[:12]}")
                 return container.id
         except Exception as e:
             logger.error(f"Error creating pooled container: {str(e)}")
@@ -132,6 +284,7 @@ class DockerManager:
             if self.container_pool:
                 container_id = self.container_pool.pop()
                 self.in_use_containers.add(container_id)
+                logger.debug(f"Retrieved container {container_id[:12]} from pool")
 
         # If no container available in pool, create a new one
         if not container_id:
@@ -154,11 +307,9 @@ class DockerManager:
                 # Check container still exists and is healthy
                 container = self.client.containers.get(container_id)
 
-                # Reset container state to ensure isolation between executions
+                # Reset container state if needed (stop running processes, clean temporary files)
                 try:
-                    # Kill any running processes
                     container.exec_run("pkill -9 python", user="root")
-                    # Clean up /app directory
                     container.exec_run("rm -rf /app/*", user="root")
                 except Exception as e:
                     logger.warning(f"Error resetting container state: {str(e)}")
@@ -180,195 +331,242 @@ class DockerManager:
                 # Try to force remove if there's an issue
                 try:
                     self.client.containers.get(container_id).remove(force=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error removing container {container_id[:12]}: {str(e)}")
 
                 if container_id in self.container_creation_timestamps:
                     del self.container_creation_timestamps[container_id]
 
     async def execute_transient(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute code in a new container that doesn't persist state."""
-        if state is None:
-            state = {}
+        """Execute Python code in a new container that doesn't persist state."""
+        try:
+            # Validate the code first
+            is_valid, error_message = self.validator.validate(code)
+            if not is_valid:
+                return {
+                    "stdout": "",
+                    "error": f"Validation error: {error_message}",
+                    "error_type": "validation_error",
+                    "status": "error",
+                }
 
-        # Check if pooling is enabled and use the pooled version if it is
-        if self.pool_enabled:
-            try:
+            # If Docker is not available, return a clear error
+            if not self.docker_available:
+                return {
+                    "stdout": "",
+                    "error": "Docker is not available. Please make sure Docker is running and restart the server.",
+                    "error_type": "docker_unavailable",
+                    "status": "error",
+                }
+
+            # Use pooled execution if enabled
+            if self.pool_enabled:
                 return await self._execute_transient_pooled(code, state)
-            except Exception as e:
-                logger.warning(f"Pooled execution failed: {str(e)}, falling back to standard execution")
-                # Fall back to standard execution if pooled execution fails
+            else:
+                return await self._execute_transient_original(code, state)
 
-        # Standard execution (non-pooled)
-        return await self._execute_transient_standard(code, state)
+        except Exception as e:
+            if not isinstance(e, DockerExecutionError):
+                raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
+            raise
 
-    async def _execute_transient_pooled(self, code: str, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute code using a container from the pool."""
+    async def _execute_transient_pooled(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Execute Python code using a container from the pool."""
         container_id = None
         try:
             # Get a container from the pool
             container_id = await self._get_container_from_pool()
             container = self.client.containers.get(container_id)
 
-            # Create the Python script with the code and state
-            wrapped_code = f"""
-import json, sys, io
-from contextlib import redirect_stdout, redirect_stderr
+            # Create temporary directory to mount inside the container
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Create Python file with the code
+                script_path = os.path.join(temp_dir, "script.py")
 
-state = {json.dumps(state)}
+                # Write the Python code to a file
+                with open(script_path, "w") as f:
+                    f.write(code)
 
-stdout_capture = io.StringIO()
-stderr_capture = io.StringIO()
+                # Copy script to container
+                import subprocess
 
-def ensure_serializable(obj):
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    elif isinstance(obj, (list, tuple)):
-        return [ensure_serializable(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {{k: ensure_serializable(v) for k, v in obj.items()}}
-    return str(obj)
+                cp_script = subprocess.run(["docker", "cp", script_path, f"{container.id}:/app/script.py"], capture_output=True)
 
-try:
-    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        exec({repr(code)}, state)
-    result = ensure_serializable({{
-        "__stdout__": stdout_capture.getvalue(),
-        "__stderr__": stderr_capture.getvalue(),
-        "__error__": None,
-        **state
-    }})
-except Exception as e:
-    result = ensure_serializable({{
-        "__stdout__": stdout_capture.getvalue(),
-        "__stderr__": stderr_capture.getvalue(),
-        "__error__": str(e),
-        **state
-    }})
+                if cp_script.returncode != 0:
+                    raise DockerExecutionError(f"Failed to copy script to container: {cp_script.stderr.decode('utf-8')}")
 
-result.pop('__builtins__', None)
-print("---OUTPUT_START---")
-print(json.dumps(result))
-print("---OUTPUT_END---")
-"""
+                # Run the Python code directly
+                exec_result = container.exec_run(
+                    cmd=["python", "/app/script.py"],
+                    workdir="/app",
+                )
 
-            # Write the script to the container
-            escaped_code = wrapped_code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
-            write_cmd = f'echo "{escaped_code}" > /app/execute_script.py'
+                # Clean up the script
+                container.exec_run(
+                    cmd=["rm", "-f", "/app/script.py"],
+                )
 
-            exec_result = container.exec_run(cmd=["bash", "-c", write_cmd], workdir=self.config.docker.working_dir)
+                # Decode the output
+                output = exec_result.output.decode("utf-8")
+                exit_code = exec_result.exit_code
 
-            if exec_result.exit_code != 0:
-                raise DockerExecutionError(f"Failed to create script in container: {exec_result.output.decode('utf-8')}")
+                # Check for Python-specific errors and parse them if present
+                is_success = exit_code == 0 and "error:" not in output.lower()
 
-            # Execute the script
-            exec_result = container.exec_run(cmd=["python", "/app/execute_script.py"], workdir=self.config.docker.working_dir)
+                result = {
+                    "stdout": output,
+                    "exit_code": exit_code,
+                    "status": "success" if is_success else "error",
+                }
 
-            # Parse the output
-            output = exec_result.output.decode("utf-8")
-            start_marker = "---OUTPUT_START---"
-            end_marker = "---OUTPUT_END---"
+                # If there was an error, add more detailed error information
+                if not is_success:
+                    python_error = self.validator.parse_python_error(output)
+                    if python_error:
+                        result["error"] = python_error.message
+                        result["error_info"] = python_error.to_dict()
+                    else:
+                        result["error"] = "Python execution error" if exit_code != 0 else "Unknown error in Python output"
 
-            start_idx = output.find(start_marker)
-            end_idx = output.rfind(end_marker)
-
-            if start_idx >= 0 and end_idx >= 0:
-                json_str = output[start_idx + len(start_marker) : end_idx].strip()
-                return json.loads(json_str)
-
-            # If output parsing fails, return a simple result
-            return {"__stdout__": output, "__stderr__": "", "__error__": None, **state}
+                return result
 
         except Exception as e:
-            raise DockerExecutionError(f"Error executing code in pooled container: {str(e)}")
+            logger.error(f"Error in pooled execution: {str(e)}")
+            raise DockerExecutionError(f"Error executing Python code in pooled container: {str(e)}")
 
         finally:
             # Return the container to the pool if we got one
             if container_id:
                 await self._return_container_to_pool(container_id)
 
-    async def _execute_transient_standard(self, code: str, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute code in a new container without using the pool."""
-        wrapped_code = f"""
-import json, sys, io
-from contextlib import redirect_stdout, redirect_stderr
+    async def _execute_transient_original(self, code: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Original implementation of transient execution without pooling."""
+        # Create temporary directory to mount inside the container
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create Python file with the code
+            script_path = os.path.join(temp_dir, "script.py")
 
-state = {json.dumps(state)}
+            # Create a wrapper script to capture output and errors
+            python_runner_path = os.path.join(temp_dir, "run_python.sh")
 
-stdout_capture = io.StringIO()
-stderr_capture = io.StringIO()
+            # Write the Python code to a file
+            with open(script_path, "w") as f:
+                f.write(code)
 
-def ensure_serializable(obj):
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    elif isinstance(obj, (list, tuple)):
-        return [ensure_serializable(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {{k: ensure_serializable(v) for k, v in obj.items()}}
-    return str(obj)
+            # Create a wrapper script to run Python and capture different streams
+            with open(python_runner_path, "w") as f:
+                script_content = """#!/bin/bash
+# Wrapper script to execute Python and capture output streams
+echo "Running Python in $(pwd)"
+echo "Python version: $(python --version)"
+echo "Content of script.py:"
+cat /app/script.py
+echo "---"
 
-try:
-    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        exec({repr(code)}, state)
-    result = ensure_serializable({{
-        "__stdout__": stdout_capture.getvalue(),
-        "__stderr__": stderr_capture.getvalue(),
-        "__error__": None,
-        **state
-    }})
-except Exception as e:
-    result = ensure_serializable({{
-        "__stdout__": stdout_capture.getvalue(),
-        "__stderr__": stderr_capture.getvalue(),
-        "__error__": str(e),
-        **state
-    }})
+# Run Python with the script
+python_output=$(python /app/script.py 2>&1)
+exit_code=$?
 
-result.pop('__builtins__', None)
-print("---OUTPUT_START---")
-print(json.dumps(result))
-print("---OUTPUT_END---")
+# Write structured result with clear markers for parsing
+echo "---PYTHON_OUTPUT_START---"
+echo "$python_output"
+echo "---PYTHON_OUTPUT_END---"
+echo "---PYTHON_EXIT_CODE_START---"
+echo "$exit_code"
+echo "---PYTHON_EXIT_CODE_END---"
+exit $exit_code
 """
-        logger.info("Executing transient with detach=False")
-        try:
-            # Run synchronously to avoid race condition
+                f.write(script_content)
+
+            # Make the wrapper script executable
+            os.chmod(python_runner_path, 0o755)
+
+            # Run container synchronously with the script
             container_output = self.client.containers.run(
                 image=self.config.docker.image,
-                command=["python", "-c", wrapped_code],
+                command=["timeout", str(self.config.docker.timeout), "/app/run_python.sh"],
+                volumes={temp_dir: {"bind": "/app", "mode": "rw"}},
+                working_dir="/app",  # Execute in the mounted volume
                 mem_limit=self.config.docker.memory_limit,
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
                 network_disabled=self.config.docker.network_disabled,
-                read_only=True,
                 remove=True,
                 detach=False,  # Run synchronously
             )
 
-            # Decode and parse the output
+            # Decode the output
             output = container_output.decode("utf-8")
-            start_marker = "---OUTPUT_START---"
-            end_marker = "---OUTPUT_END---"
 
-            start_idx = output.find(start_marker)
-            end_idx = output.rfind(end_marker)
+            # Parse the structured output
+            python_output = ""
+            exit_code = -1
 
-            if start_idx >= 0 and end_idx >= 0:
-                json_str = output[start_idx + len(start_marker) : end_idx].strip()
-                return json.loads(json_str)
-            return {"__stdout__": output, "__stderr__": "", "__error__": None, **state}
+            # Extract the Python output
+            output_start = output.find("---PYTHON_OUTPUT_START---")
+            output_end = output.find("---PYTHON_OUTPUT_END---")
+            if output_start >= 0 and output_end >= 0:
+                python_output = output[output_start + len("---PYTHON_OUTPUT_START---") : output_end].strip()
 
-        except Exception as e:
-            raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
+            # Extract the exit code
+            exit_code_start = output.find("---PYTHON_EXIT_CODE_START---")
+            exit_code_end = output.find("---PYTHON_EXIT_CODE_END---")
+            if exit_code_start >= 0 and exit_code_end >= 0:
+                exit_code_str = output[exit_code_start + len("---PYTHON_EXIT_CODE_START---") : exit_code_end].strip()
+                try:
+                    exit_code = int(exit_code_str)
+                except ValueError:
+                    exit_code = -1
+
+            # Check for Python-specific errors and parse them if present
+            is_success = exit_code == 0 and "error:" not in python_output.lower()
+
+            result = {
+                "stdout": python_output,
+                "exit_code": exit_code,
+                "status": "success" if is_success else "error",
+            }
+
+            # If there was an error, add more detailed error information
+            if not is_success:
+                python_error = self.validator.parse_python_error(python_output)
+                if python_error:
+                    result["error"] = python_error.message
+                    result["error_info"] = python_error.to_dict()
+                else:
+                    result["error"] = "Python execution error" if exit_code != 0 else "Unknown error in Python output"
+
+            return result
 
     async def execute_persistent(self, session_id: str, code: str) -> Dict[str, Any]:
-        """Execute code in a persistent container that retains state between calls.
+        """Execute Python code in a persistent container that retains state between calls.
 
         Args:
             session_id: A unique identifier for the session
             code: The Python code to execute
 
         Returns:
-            The result of the execution
+            A dictionary containing the execution results with stdout, error information and status
         """
+        # Validate the code first
+        is_valid, error_message = self.validator.validate(code)
+        if not is_valid:
+            return {
+                "stdout": "",
+                "error": f"Validation error: {error_message}",
+                "error_type": "validation_error",
+                "status": "error",
+            }
+
+        # If Docker is not available, return a clear error
+        if not self.docker_available:
+            return {
+                "stdout": "",
+                "error": "Docker is not available. Please make sure Docker is running and restart the server.",
+                "error_type": "docker_unavailable",
+                "status": "error",
+                "session_id": session_id,
+            }
+
         container_id = self.persistent_containers.get(session_id)
 
         # Create a new container if it doesn't exist
@@ -418,515 +616,175 @@ print("---OUTPUT_END---")
         try:
             container = self.client.containers.get(container_id)
 
-            # Instead of using a temporary file + docker cp, create the file directly in the container
-            wrapped_code = self._create_execute_persist_script(code)
+            # Create a temporary file with the code
+            exec_id = os.urandom(8).hex()
+            script_filename = f"script_{exec_id}.py"
+            wrapper_filename = f"run_python_{exec_id}.sh"
 
-            # Create script directly in container using a shell command with echo
-            # Escape the script for shell safety
-            escaped_code = wrapped_code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+            # Escape single quotes for shell command
+            safe_code = code.replace("'", "'\"'\"'")
 
-            # Write the script directly to /app using echo
-            write_cmd = f'echo "{escaped_code}" > /app/execute_script.py'
-            exec_result = container.exec_run(
-                cmd=["bash", "-c", write_cmd],
-                workdir=self.config.docker.working_dir,
+            # Create the Python file
+            cmd = f"echo '{safe_code}' > /app/{script_filename}"
+            script_create_cmd = container.exec_run(
+                cmd=["sh", "-c", cmd],
             )
 
-            if exec_result.exit_code != 0:
-                output = exec_result.output.decode("utf-8").strip()
-                raise DockerExecutionError(f"Failed to create script in container: {output}")
+            if script_create_cmd.exit_code != 0:
+                raise DockerExecutionError(f"Failed to create script file: {script_create_cmd.output.decode('utf-8')}")
 
-            # Make the script executable
-            chmod_cmd = "chmod 755 /app/execute_script.py"
-            exec_result = container.exec_run(
-                cmd=["bash", "-c", chmod_cmd],
-                workdir=self.config.docker.working_dir,
+            # Create a wrapper script to capture output
+            wrapper_script = f"""#!/bin/bash
+# Wrapper script to execute Python and capture output streams
+echo "Running Python in $(pwd)"
+echo "Python version: $(python --version)"
+echo "Content of {script_filename}:"
+cat /app/{script_filename}
+echo "---"
+
+# Run Python with the script
+python_output=$(python /app/{script_filename} 2>&1)
+exit_code=$?
+
+# Write structured result with clear markers for parsing
+echo "---PYTHON_OUTPUT_START---"
+echo "$python_output"
+echo "---PYTHON_OUTPUT_END---"
+echo "---PYTHON_EXIT_CODE_START---"
+echo "$exit_code"
+echo "---PYTHON_EXIT_CODE_END---"
+
+# Clean up the script file
+rm -f /app/{script_filename}
+
+exit $exit_code
+"""
+            # Escape single quotes for shell command
+            safe_wrapper = wrapper_script.replace("'", "'\"'\"'")
+            cmd = f"echo '{safe_wrapper}' > /app/{wrapper_filename} && chmod +x /app/{wrapper_filename}"
+
+            wrapper_create_cmd = container.exec_run(
+                cmd=["sh", "-c", cmd],
             )
 
-            if exec_result.exit_code != 0:
-                output = exec_result.output.decode("utf-8").strip()
-                raise DockerExecutionError(f"Failed to make script executable: {output}")
+            if wrapper_create_cmd.exit_code != 0:
+                raise DockerExecutionError(f"Failed to create wrapper script: {wrapper_create_cmd.output.decode('utf-8')}")
 
-            # Execute the script in the container
+            # Execute the wrapper script
             exec_result = container.exec_run(
-                cmd=["python", "/app/execute_script.py"],
-                workdir=self.config.docker.working_dir,
+                cmd=[f"/app/{wrapper_filename}"],
+                workdir="/app",
             )
 
-            # Process results
-            output = exec_result.output.decode("utf-8").strip()
-            if exec_result.exit_code != 0:
-                raise DockerExecutionError(f"Execution failed: {output}")
+            # Capture the output
+            output = exec_result.output.decode("utf-8")
+            exit_code = exec_result.exit_code
 
-            # Extract the JSON result from the output
-            try:
-                # Find the JSON output markers
-                start_marker = "---OUTPUT_START---"
-                end_marker = "---OUTPUT_END---"
+            # Clean up the wrapper script
+            container.exec_run(
+                cmd=["rm", f"/app/{wrapper_filename}"],
+            )
 
-                start_idx = output.find(start_marker)
-                end_idx = output.rfind(end_marker)
+            # Parse the structured output
+            python_output = ""
+            parsed_exit_code = exit_code  # Default to the exit code from exec_run
 
-                if start_idx >= 0 and end_idx >= 0:
-                    json_str = output[start_idx + len(start_marker) : end_idx].strip()
-                    return json.loads(json_str)
+            # Extract the Python output
+            output_start = output.find("---PYTHON_OUTPUT_START---")
+            output_end = output.find("---PYTHON_OUTPUT_END---")
+            if output_start >= 0 and output_end >= 0:
+                python_output = output[output_start + len("---PYTHON_OUTPUT_START---") : output_end].strip()
+
+            # Extract the exit code from the output
+            exit_code_start = output.find("---PYTHON_EXIT_CODE_START---")
+            exit_code_end = output.find("---PYTHON_EXIT_CODE_END---")
+            if exit_code_start >= 0 and exit_code_end >= 0:
+                exit_code_str = output[exit_code_start + len("---PYTHON_EXIT_CODE_START---") : exit_code_end].strip()
+                try:
+                    parsed_exit_code = int(exit_code_str)
+                except ValueError:
+                    parsed_exit_code = exit_code  # Fall back to the original exit code
+
+            # Check for Python-specific errors and parse them if present
+            is_success = parsed_exit_code == 0 and "error:" not in python_output.lower()
+
+            result = {
+                "stdout": python_output,
+                "exit_code": parsed_exit_code,
+                "status": "success" if is_success else "error",
+                "session_id": session_id,  # Include the session ID in the response
+            }
+
+            # If there was an error, add more detailed error information
+            if not is_success:
+                python_error = self.validator.parse_python_error(python_output)
+                if python_error:
+                    result["error"] = python_error.message
+                    result["error_info"] = python_error.to_dict()
                 else:
-                    return {"output": output, "error": None}
-            except json.JSONDecodeError:
-                return {"output": output, "error": None}
+                    result["error"] = "Python execution error" if parsed_exit_code != 0 else "Unknown error in Python output"
+
+            return result
 
         except Exception as e:
-            if not isinstance(e, DockerExecutionError):
-                raise DockerExecutionError(f"Error executing code in persistent container: {str(e)}")
-            raise
+            if isinstance(e, NotFound):
+                # Container no longer exists, remove from tracked containers
+                if session_id in self.persistent_containers:
+                    del self.persistent_containers[session_id]
+                raise DockerExecutionError(f"Session {session_id} has expired or was deleted")
+            else:
+                raise DockerExecutionError(f"Error executing Python code: {str(e)}")
 
-    async def install_package(self, session_id: Optional[str], package_name: str) -> str:
-        """Install a Python package in a container.
+    async def cleanup_session(self, session_id: str) -> Dict[str, Any]:
+        """Clean up a persistent session.
 
         Args:
-            session_id: The session ID for persistent containers, or None for transient
-            package_name: The name of the package to install
+            session_id: The session ID to clean up
 
         Returns:
-            The output of the installation command
+            A dictionary indicating success or failure
         """
-        install_cmd = []
-        primary_installer = self.config.package.installer
+        # If Docker is not available, return a clear error
+        if not self.docker_available:
+            return {"status": "error", "message": "Docker is not available. Please make sure Docker is running and restart the server."}
 
-        # Build the command for the primary installer (uv or pip)
-        if primary_installer == "uv":
-            # Use uv without --system flag since we're in a virtual env
-            install_cmd = ["uv", "pip", "install"]
-            if self.config.package.index_url:
-                install_cmd.extend(["--index-url", self.config.package.index_url])
-            for host in self.config.package.trusted_hosts or []:
-                install_cmd.extend(["--trusted-host", host])
-            install_cmd.append(package_name)
-        else:  # pip
-            install_cmd = ["pip", "install"]
-            if self.config.package.index_url:
-                install_cmd.extend(["--index-url", self.config.package.index_url])
-            for host in self.config.package.trusted_hosts or []:
-                install_cmd.extend(["--trusted-host", host])
-            install_cmd.append(package_name)
+        container_id = self.persistent_containers.get(session_id)
+        if not container_id:
+            return {"status": "not_found", "message": f"No session found with ID {session_id}"}
 
-        if session_id and session_id in self.persistent_containers:
-            # Install in the persistent container
-            container_id = self.persistent_containers[session_id]
+        try:
             container = self.client.containers.get(container_id)
-
-            # Temporarily enable networking for package installation if it was disabled
-            # Save the current network settings
-            network_was_disabled = False
-            if hasattr(container, "attrs") and "NetworkSettings" in container.attrs:
-                network_settings = container.attrs["NetworkSettings"]
-                network_was_disabled = not bool(network_settings.get("Networks"))
-
-            # If network was disabled, reconnect to the default network
-            if network_was_disabled:
-                try:
-                    self.client.networks.get("bridge").connect(container)
-                    logger.info(f"Temporarily enabled network for container {container_id}")
-                except Exception as e:
-                    logger.warning(f"Could not enable networking for container: {e}")
-
-            # Try the primary installer first
-            exec_result = container.exec_run(
-                cmd=install_cmd,
-                workdir=self.config.docker.working_dir,
-                environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
-            )
-
-            # If the primary installer fails and it's uv, fall back to pip
-            if exec_result.exit_code != 0 and primary_installer == "uv":
-                # Build the fallback pip command
-                fallback_cmd = ["pip", "install"]
-                if self.config.package.index_url:
-                    fallback_cmd.extend(["--index-url", self.config.package.index_url])
-                for host in self.config.package.trusted_hosts or []:
-                    fallback_cmd.extend(["--trusted-host", host])
-                fallback_cmd.append(package_name)
-
-                # Try with pip instead
-                exec_result = container.exec_run(
-                    cmd=fallback_cmd,
-                    workdir=self.config.docker.working_dir,
-                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
-                )
-
-            # If network was disabled and we enabled it, disconnect it again
-            if network_was_disabled:
-                try:
-                    self.client.networks.get("bridge").disconnect(container)
-                    logger.info(f"Restored network settings for container {container_id}")
-                except Exception as e:
-                    logger.warning(f"Could not restore network settings: {e}")
-
-            return exec_result.output.decode("utf-8")
-        else:
-            # Create a temporary container just for installation
-            try:
-                # Use run instead of create+start to wait for completion
-                result = self.client.containers.run(
-                    image=self.config.docker.image,
-                    command=install_cmd,
-                    working_dir=self.config.docker.working_dir,
-                    network_disabled=False,  # Explicitly enable network for package installation
-                    remove=True,
-                    detach=False,  # Run in foreground and return output directly
-                    environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
-                )
-
-                # Result is already a bytes object, so just decode it
-                if isinstance(result, bytes):
-                    return result.decode("utf-8")
-                else:
-                    # If for some reason we get a container back instead of bytes
-                    return result.logs().decode("utf-8")
-
-            except Exception as e:
-                # If primary installer fails and it's uv, try with pip
-                if primary_installer == "uv" and "executable file not found" in str(e):
-                    fallback_cmd = ["pip", "install"]
-                    if self.config.package.index_url:
-                        fallback_cmd.extend(["--index-url", self.config.package.index_url])
-                    for host in self.config.package.trusted_hosts or []:
-                        fallback_cmd.extend(["--trusted-host", host])
-                    fallback_cmd.append(package_name)
-
-                    result = self.client.containers.run(
-                        image=self.config.docker.image,
-                        command=fallback_cmd,
-                        working_dir=self.config.docker.working_dir,
-                        network_disabled=False,  # Explicitly enable network for package installation
-                        remove=True,
-                        detach=False,  # Run in foreground and return output directly
-                        environment={"PATH": "/home/appuser/.venv/bin:$PATH", "VIRTUAL_ENV": "/home/appuser/.venv"},
-                    )
-
-                    # Result is already a bytes object, so just decode it
-                    if isinstance(result, bytes):
-                        return result.decode("utf-8")
-                    else:
-                        # If for some reason we get a container back instead of bytes
-                        return result.logs().decode("utf-8")
-                raise
-
-    def cleanup_session(self, session_id: str) -> None:
-        """Clean up a persistent session by stopping and removing its container."""
-        if session_id in self.persistent_containers:
-            container_id = self.persistent_containers[session_id]
-            try:
-                logger.info(f"Cleaning up container {container_id} for session {session_id}")
-                container = self.client.containers.get(container_id)
-
-                # Clean up persistence file if it exists
-                try:
-                    logger.info(f"Removing persistence file in container {container_id}")
-                    container.exec_run(cmd=["rm", "-f", "/app/persistent_vars.pkl"], workdir=self.config.docker.working_dir)
-                except Exception as e:
-                    logger.warning(f"Error removing persistence file: {e}")
-
-                # Check if container is running before stopping
-                if container.status == "running":
-                    logger.info(f"Stopping container {container_id}")
-                    container.stop(timeout=5)
-
-                logger.info(f"Removing container {container_id}")
-                container.remove(force=True)  # Force removal in case it's still running
-                logger.info(f"Successfully removed container {container_id}")
-            except docker.errors.NotFound:
-                logger.warning(f"Container {container_id} not found during cleanup")
-            except Exception as e:
-                logger.error(f"Error cleaning up container {container_id}: {e}")
-
-            # Always remove session from tracking
+            container.stop()
+            container.remove()
             del self.persistent_containers[session_id]
-            logger.info(f"Removed session {session_id} from tracking")
-        else:
-            logger.warning(f"Session {session_id} not found during cleanup")
-
-    def cleanup_all_sessions(self) -> None:
-        """Clean up all persistent sessions."""
-        for session_id in list(self.persistent_containers.keys()):
-            self.cleanup_session(session_id)
-
-    async def cleanup_pool(self) -> None:
-        """Clean up all containers in the pool."""
-        if not self.pool_enabled:
-            return
-
-        logger.info("Cleaning up container pool")
-        async with self.pool_lock:
-            # Clean up containers in the pool
-            for container_id in list(self.container_pool):
-                try:
-                    container = self.client.containers.get(container_id)
-                    logger.info(f"Removing pooled container {container_id[:12]}")
-                    container.remove(force=True)
-                except Exception as e:
-                    logger.warning(f"Error removing container {container_id[:12]}: {str(e)}")
-
-            # Clean up containers that are in use but not in sessions
-            for container_id in list(self.in_use_containers):
-                try:
-                    # Skip containers that are part of a session
-                    if container_id in self.persistent_containers.values():
-                        continue
-
-                    container = self.client.containers.get(container_id)
-                    logger.info(f"Removing in-use container {container_id[:12]}")
-                    container.remove(force=True)
-                except Exception as e:
-                    logger.warning(f"Error removing container {container_id[:12]}: {str(e)}")
-
-            # Clear pool data structures
-            self.container_pool.clear()
-            self.in_use_containers.clear()
-            self.container_creation_timestamps.clear()
-
-        logger.info("Container pool cleanup complete")
+            return {"status": "success", "message": f"Session {session_id} cleaned up successfully"}
+        except NotFound:
+            # Container already gone, just remove the reference
+            if session_id in self.persistent_containers:
+                del self.persistent_containers[session_id]
+            return {"status": "not_found", "message": f"Session {session_id} not found, may have already been cleaned up"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error cleaning up session {session_id}: {str(e)}"}
 
     async def _wait_for_container(self, container_id: str) -> int:
         """Wait for a container to finish and return its exit code."""
-        while True:
+        client = docker.APIClient()
+        poll_interval = 0.1  # 100ms between polls
+        max_polls = int(self.config.docker.timeout / poll_interval)
+
+        for _ in range(max_polls):  # Poll 10 times per second
             try:
-                container = self.client.containers.get(container_id)
-                if container.status != "running":
-                    return container.attrs["State"]["ExitCode"]
-                await asyncio.sleep(0.1)
+                container_info = client.inspect_container(container_id)
+                if not container_info["State"]["Running"]:
+                    return container_info["State"]["ExitCode"]
+            except docker.errors.NotFound:
+                # Container removed, assume success
+                return 0
             except Exception as e:
-                logger.error(f"Error waiting for container {container_id}: {e}")
-                # If the container is not found, it might have been removed
-                # This can happen if the container exits and is set to auto-remove
-                return 0  # Assume success if container is gone
+                logger.warning(f"Error checking container state: {e}")
+                # Continue waiting despite the error
+            await asyncio.sleep(poll_interval)
 
-    def _create_wrapper_script(self, code: str) -> str:
-        """Create a wrapper script for transient execution."""
-        return f"""
-import json
-import sys
-import io
-import os
-import traceback
-from contextlib import redirect_stdout, redirect_stderr
-
-print("Docker wrapper script starting...")
-print(f"Python version: {{sys.version}}")
-
-# Load state from file
-try:
-    with open('/app/state.json', 'r') as f:
-        state_dict = json.load(f)
-    print("Successfully loaded state from /app/state.json")
-except Exception as e:
-    print(f"Error loading state: {{e}}")
-    state_dict = {{}}
-
-# Capture stdout and stderr
-stdout_capture = io.StringIO()
-stderr_capture = io.StringIO()
-
-# Debug: print environment and current state
-print(f"Current directory: {{os.getcwd()}}")
-print(f"Directory contents: {{os.listdir('.')}}")
-print(f"Environment: {{os.environ}}")
-
-# Make sure state is serializable
-def ensure_serializable(obj):
-    \"\"\"Ensure all objects in state are JSON serializable.\"\"\"
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    elif isinstance(obj, (list, tuple)):
-        return [ensure_serializable(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {{k: ensure_serializable(v) for k, v in obj.items()}}
-    else:
-        # For non-serializable objects, convert to string representation
-        return str(obj)
-
-# Execute code with state dict as globals
-try:
-    print("Executing code...")
-    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        exec_globals = {{'state': state_dict}}
-        exec({repr(code)}, exec_globals)
-
-        # Update state with any new or modified variables
-        # Only keep serializable values
-        for key, value in exec_globals.items():
-            if key != 'state' and not key.startswith('__'):
-                try:
-                    # Test if value is JSON-serializable
-                    json.dumps(value)
-                    state_dict[key] = value
-                except (TypeError, OverflowError):
-                    # If not serializable, convert to string
-                    state_dict[key] = ensure_serializable(value)
-
-        # Add stdout and stderr to state
-        state_dict['__stdout__'] = stdout_capture.getvalue()
-        state_dict['__stderr__'] = stderr_capture.getvalue()
-        state_dict['__error__'] = None
-
-except Exception as e:
-    error_with_traceback = f"{{e}}\\n{{traceback.format_exc()}}"
-    state_dict['__stdout__'] = stdout_capture.getvalue()
-    state_dict['__stderr__'] = stderr_capture.getvalue()
-    state_dict['__error__'] = error_with_traceback
-    print(f"Error during execution: {{error_with_traceback}}")
-
-# Save updated state
-print("Writing output to /app/output.json...")
-try:
-    # Make one final check to ensure everything is serializable
-    serializable_state = ensure_serializable(state_dict)
-
-    with open('/app/output.json', 'w') as f:
-        json.dump(serializable_state, f)
-    print("Successfully wrote output state")
-    # Verify file exists after writing
-    print(f"File exists after writing: {{os.path.exists('/app/output.json')}}")
-    print(f"File size: {{os.path.getsize('/app/output.json')}}")
-except Exception as e:
-    error_with_traceback = f"{{e}}\\n{{traceback.format_exc()}}"
-    print(f"Error writing output: {{error_with_traceback}}")
-    # Try to write at least a minimal output file
-    try:
-        minimal_state = {{
-            '__stdout__': stdout_capture.getvalue(),
-            '__stderr__': stderr_capture.getvalue(),
-            '__error__': f"Error serializing state: {{error_with_traceback}}"
-        }}
-        with open('/app/output.json', 'w') as f:
-            json.dump(minimal_state, f)
-        print("Wrote minimal output state with error message")
-    except Exception as nested_e:
-        print(f"Failed to write even minimal state: {{nested_e}}")
-
-# Print output summary
-print("=== EXECUTION RESULTS ===")
-if state_dict.get('__stdout__'):
-    print("=== STDOUT ===")
-    print(state_dict['__stdout__'])
-if state_dict.get('__stderr__'):
-    print("=== STDERR ===")
-    print(state_dict['__stderr__'])
-if state_dict.get('__error__'):
-    print("=== ERROR ===")
-    print(state_dict['__error__'])
-
-print("Docker wrapper script completed.")
-"""
-
-    def _create_execute_persist_script(self, code: str) -> str:
-        """Create a script for persistent execution."""
-        return f"""
-import json
-import sys
-import io
-import os
-import traceback
-import pickle
-from contextlib import redirect_stdout, redirect_stderr
-
-print("Docker persistent execution script starting...")
-print(f"Python version: {{sys.version}}")
-print(f"Current directory: {{os.getcwd()}}")
-print(f"Directory contents: {{os.listdir('.')}}")
-
-# Capture stdout and stderr
-stdout_capture = io.StringIO()
-stderr_capture = io.StringIO()
-
-# Path to store persisted variables
-PERSISTENCE_FILE = '/app/persistent_vars.pkl'
-
-# Load previously saved variables if they exist
-if os.path.exists(PERSISTENCE_FILE):
-    try:
-        with open(PERSISTENCE_FILE, 'rb') as f:
-            loaded_vars = pickle.load(f)
-            # Add loaded variables to globals
-            for var_name, var_value in loaded_vars.items():
-                globals()[var_name] = var_value
-        print(f"Loaded persistent variables from {{PERSISTENCE_FILE}}")
-    except Exception as e:
-        print(f"Error loading persistent variables: {{e}}")
-
-# Make sure state is serializable
-def ensure_serializable(obj):
-    \"\"\"Ensure all objects in state are JSON serializable.\"\"\"
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    elif isinstance(obj, (list, tuple)):
-        return [ensure_serializable(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {{k: ensure_serializable(v) for k, v in obj.items()}}
-    else:
-        # For non-serializable objects, convert to string representation
-        return str(obj)
-
-# Execute code in the global namespace to preserve variables between executions
-try:
-    print("Executing code...")
-    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        # Execute directly in the global namespace so variables persist
-        exec({repr(code)}, globals())
-
-        # Save variables for persistence - filter out modules, functions, and special variables
-        vars_to_save = {{}}
-        for key, value in list(globals().items()):
-            if (not key.startswith('__') and
-                not callable(value) and
-                not key in ('ensure_serializable', 'stdout_capture', 'stderr_capture',
-                           'json', 'sys', 'io', 'os', 'traceback', 'redirect_stdout',
-                           'redirect_stderr', 'pickle', 'PERSISTENCE_FILE', 'vars_to_save')):
-                try:
-                    # Try pickling to verify if it can be persisted
-                    pickle.dumps(value)
-                    vars_to_save[key] = value
-                except:
-                    # Skip values that can't be pickled
-                    pass
-
-        # Save variables to file
-        try:
-            with open(PERSISTENCE_FILE, 'wb') as f:
-                pickle.dump(vars_to_save, f)
-            print(f"Saved {{len(vars_to_save)}} variables to {{PERSISTENCE_FILE}}")
-        except Exception as e:
-            print(f"Error saving persistent variables: {{e}}")
-
-        # Prepare a state dictionary of all variables in the global namespace for JSON response
-        state_dict = {{}}
-        for key, value in vars_to_save.items():
-            try:
-                # Try serializing to check if JSON-serializable
-                json.dumps(value)
-                state_dict[key] = value
-            except (TypeError, OverflowError):
-                # If not serializable, use string representation
-                state_dict[key] = ensure_serializable(value)
-
-        result = {{
-            "output": stdout_capture.getvalue(),
-            "error": None,
-            "state": state_dict
-        }}
-except Exception as e:
-    error_with_traceback = f"{{e}}\\n{{traceback.format_exc()}}"
-    result = {{
-        "output": stdout_capture.getvalue(),
-        "error": error_with_traceback,
-        "state": {{}}
-    }}
-    print(f"Error during execution: {{error_with_traceback}}")
-
-# Output the result as JSON
-print("---OUTPUT_START---")
-print(json.dumps(result))
-print("---OUTPUT_END---")
-
-print("Docker persistent execution script completed.")
-"""
+        # If we got here, container is still running after timeout period
+        logger.warning(f"Container {container_id} timed out after {self.config.docker.timeout} seconds")
+        return -1  # Indicate timeout
