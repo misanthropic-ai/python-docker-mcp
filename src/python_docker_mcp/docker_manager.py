@@ -224,7 +224,7 @@ class DockerManager:
                 for result in results:
                     if isinstance(result, Exception):
                         logger.error(f"Error creating pooled container: {str(result)}")
-                    elif result:
+                    elif isinstance(result, str):  # Ensure result is a string
                         self.container_pool.append(result)
                         self.container_creation_timestamps[result] = time.time()
                         successful_creations += 1
@@ -734,6 +734,67 @@ exit $exit_code
                 raise DockerExecutionError(f"Session {session_id} has expired or was deleted")
             else:
                 raise DockerExecutionError(f"Error executing Python code: {str(e)}")
+
+    async def install_package(self, session_id: Optional[str], package_name: str) -> str:
+        """Install a Python package in a Docker container.
+
+        Args:
+            session_id: Optional session ID for persistent installation
+            package_name: The name of the package to install
+
+        Returns:
+            The output from the package installation
+        """
+        if not self.docker_available:
+            raise DockerExecutionError("Docker is not available")
+
+        try:
+            # Validate package name for security
+            if not re.match(r"^[a-zA-Z0-9_.-]+$", package_name):
+                raise ValueError(f"Invalid package name: {package_name}")
+
+            # Prepare the pip install command
+            install_cmd = f"pip install {package_name}"
+
+            if session_id:
+                # Install in a persistent container
+                if session_id not in self.persistent_containers:
+                    raise ValueError(f"Session {session_id} not found")
+
+                container_id = self.persistent_containers[session_id]
+                container = self.client.containers.get(container_id)
+
+                # Execute the pip install command
+                result = container.exec_run(
+                    cmd=["sh", "-c", install_cmd],
+                    workdir="/app",
+                    environment={"PYTHONPATH": "/app"},
+                )
+
+                if result.exit_code != 0:
+                    raise DockerExecutionError(f"Failed to install package: {result.output.decode()}")
+
+                return result.output.decode()
+            else:
+                # Install in a transient container
+                container = self.client.containers.run(
+                    image=self.config.docker.image,
+                    command=["sh", "-c", f"{install_cmd} && pip list"],
+                    detach=False,
+                    mem_limit=self.config.docker.memory_limit,
+                    cpu_quota=int(self.config.docker.cpu_limit * 100000),
+                    network_disabled=self.config.docker.network_disabled,
+                    remove=True,
+                )
+
+                return container.decode()
+
+        except docker.errors.NotFound:
+            raise DockerExecutionError("Container not found")
+        except docker.errors.APIError as e:
+            raise DockerExecutionError(f"Docker API error: {str(e)}")
+        except Exception as e:
+            raise DockerExecutionError(f"Error installing package: {str(e)}")
 
     async def cleanup_session(self, session_id: str) -> Dict[str, Any]:
         """Clean up a persistent session.
