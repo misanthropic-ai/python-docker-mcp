@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import mcp.server.stdio
 import mcp.types as types
@@ -245,7 +245,7 @@ async def main() -> None:
                 write_stream,
                 InitializationOptions(
                     server_name="python-docker-mcp",
-                    server_version="0.1.9",
+                    server_version="0.1.10",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
