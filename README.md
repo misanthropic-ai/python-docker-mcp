@@ -157,6 +157,19 @@ blocked_modules:
 | `network_disabled` | Disable network access | `true` |
 | `read_only` | Run container in read-only mode | `true` |
 
+### Container Pooling Options
+
+The server supports container pooling to improve performance by reusing containers. These settings can be configured via environment variables:
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `PYTHON_DOCKER_MCP_POOL_ENABLED` | Enable container pooling | `true` |
+| `PYTHON_DOCKER_MCP_POOL_SIZE` | Maximum number of containers in the pool | `32` |
+| `PYTHON_DOCKER_MCP_POOL_MAX_AGE` | Maximum container lifetime in seconds | `300` |
+| `PYTHON_DOCKER_MCP_MAX_CONCURRENT_CREATIONS` | Maximum number of containers that can be created simultaneously | `5` |
+| `PYTHON_DOCKER_MCP_MEMORY_LIMIT` | Memory limit for each container | `256m` |
+| `PYTHON_DOCKER_MCP_CPU_LIMIT` | CPU limit for each container (0.0-1.0) | `0.5` |
+
 ### Package Installation Options
 
 | Option | Description | Default |
