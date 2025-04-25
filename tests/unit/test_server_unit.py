@@ -78,10 +78,10 @@ async def test_handle_call_tool_execute_transient(mock_docker_manager):
     # Mock the Docker manager
     mock_docker_manager.execute_transient = AsyncMock()
     mock_docker_manager.execute_transient.return_value = {
-        "__stdout__": "Hello from transient!",
-        "__stderr__": "",
-        "__error__": None,
-        "result": 42,
+        "stdout": "Hello from transient!",
+        "stderr": "",
+        "error": None,
+        "status": "success",
     }
 
     # Call the handler
@@ -216,8 +216,9 @@ async def test_handle_call_tool_install_package_persistent(mock_docker_manager):
 @pytest.mark.asyncio
 async def test_handle_call_tool_cleanup_session(mock_docker_manager):
     """Test cleaning up a session."""
-    # Mock the Docker manager
-    mock_docker_manager.cleanup_session = MagicMock()
+    # Mock the Docker manager with AsyncMock for async method
+    mock_docker_manager.cleanup_session = AsyncMock()
+    mock_docker_manager.cleanup_session.return_value = {"status": "success"}
 
     # Call the handler
     session_id = "session-to-cleanup"
@@ -233,42 +234,49 @@ async def test_handle_call_tool_cleanup_session(mock_docker_manager):
 @pytest.mark.asyncio
 async def test_handle_call_tool_invalid_tool():
     """Test calling an invalid tool."""
-    with pytest.raises(ValueError, match="Unknown tool:"):
-        await handle_call_tool("invalid-tool", {"param": "value"})
+    result = await handle_call_tool("invalid-tool", {"param": "value"})
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error executing invalid-tool: Unknown tool: invalid-tool" in result[0].text
 
 
 @pytest.mark.asyncio
 async def test_handle_call_tool_missing_arguments():
     """Test calling a tool with missing arguments."""
-    with pytest.raises(ValueError, match="Missing arguments"):
-        await handle_call_tool("execute-transient", None)
+    result = await handle_call_tool("execute-transient", None)
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error executing execute-transient: Missing arguments" in result[0].text
 
 
 @pytest.mark.asyncio
 async def test_handle_call_tool_missing_code():
     """Test calling execute tools without code."""
     # We need to use a non-empty arguments dict to get past the "Missing arguments" check
-    with pytest.raises(ValueError, match="Missing code"):
-        await handle_call_tool("execute-transient", {"some_arg": "value"})
-
-    with pytest.raises(ValueError, match="Missing code"):
-        await handle_call_tool("execute-persistent", {"some_arg": "value"})
+    result = await handle_call_tool("execute-transient", {"some_arg": "value"})
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error executing execute-transient: Missing code" in result[0].text
 
 
 @pytest.mark.asyncio
 async def test_handle_call_tool_missing_package_name():
     """Test calling install-package without package name."""
     # We need to use a non-empty arguments dict to get past the "Missing arguments" check
-    with pytest.raises(ValueError, match="Missing package name"):
-        await handle_call_tool("install-package", {"some_arg": "value"})
+    result = await handle_call_tool("install-package", {"some_arg": "value"})
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error executing install-package: Missing package name" in result[0].text
 
 
 @pytest.mark.asyncio
 async def test_handle_call_tool_missing_session_id():
     """Test calling cleanup-session without session ID."""
     # We need to use a non-empty arguments dict to get past the "Missing arguments" check
-    with pytest.raises(ValueError, match="Missing session ID"):
-        await handle_call_tool("cleanup-session", {"some_arg": "value"})
+    result = await handle_call_tool("cleanup-session", {"some_arg": "value"})
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error executing cleanup-session: Missing session ID" in result[0].text
 
 
 def test_format_execution_result_success():

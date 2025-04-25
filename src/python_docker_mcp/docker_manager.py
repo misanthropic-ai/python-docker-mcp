@@ -9,8 +9,9 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import docker
-from docker.errors import NotFound
+from docker.errors import ImageNotFound, NotFound
 
+from .build_docker_image import build_docker_image, get_dockerfile_path
 from .config import Configuration, load_config
 
 # Set up logging
@@ -166,6 +167,20 @@ class DockerManager:
             self.client = docker.from_env()
             self.docker_available = True
             logger.info("Docker connection established successfully")
+
+            # Ensure the configured Docker image exists locally; build it from the local Dockerfile if missing
+            if self.docker_available:
+                try:
+                    self.client.images.get(self.config.docker.image)
+                except ImageNotFound:
+                    logger.info(f"Docker image {self.config.docker.image} not found locally. Building from local Dockerfile.")
+                    try:
+                        dockerfile_path = get_dockerfile_path()
+                        build_success = build_docker_image(tag=self.config.docker.image, dockerfile=dockerfile_path)
+                        if not build_success:
+                            logger.warning(f"Failed to build Docker image: {self.config.docker.image}. Continuing, but execution may fail.")
+                    except Exception as build_err:
+                        logger.error(f"Error building Docker image {self.config.docker.image}: {build_err}")
         except Exception as e:
             logger.error(f"Docker is not available: {e}")
             logger.warning("Running with Docker unavailable - tool calls will return errors")
@@ -249,10 +264,10 @@ class DockerManager:
                     read_only=False,  # Allow writing to /app
                     labels={"python_docker_mcp.pooled": "true", "python_docker_mcp.created": str(time.time())},
                 )
-                logger.debug(f"Created pooled container {container.id[:12]}")
+                logger.debug(f"Created pooled python container {container.id[:12]}")
                 return container.id
         except Exception as e:
-            logger.error(f"Error creating pooled container: {str(e)}")
+            logger.error(f"Error creating pooled python container: {str(e)}")
             raise DockerExecutionError(f"Failed to create container for pool: {str(e)}")
 
     async def _get_container_from_pool(self) -> str:
@@ -321,11 +336,43 @@ class DockerManager:
                     self.container_creation_timestamps[container_id] = time.time()
                     logger.debug(f"Returned container {container_id[:12]} to pool")
                 else:
-                    # Pool is full, remove this container
-                    container.remove(force=True)
-                    if container_id in self.container_creation_timestamps:
-                        del self.container_creation_timestamps[container_id]
-                    logger.debug(f"Pool is full, removed container {container_id[:12]}")
+                    # Pool is full, find the oldest container to replace
+                    oldest_container_id = None
+                    oldest_timestamp = float("inf")
+
+                    for pool_container_id in list(self.container_pool):
+                        if pool_container_id in self.container_creation_timestamps:
+                            timestamp = self.container_creation_timestamps[pool_container_id]
+                            if timestamp < oldest_timestamp:
+                                oldest_timestamp = timestamp
+                                oldest_container_id = pool_container_id
+
+                    if oldest_container_id:
+                        # Remove the oldest container from the pool
+                        self.container_pool.remove(oldest_container_id)
+
+                        try:
+                            # Get and remove the container
+                            oldest_container = self.client.containers.get(oldest_container_id)
+                            oldest_container.remove(force=True)
+                            logger.debug(f"Removed oldest container {oldest_container_id[:12]} from pool to make room")
+                        except Exception as e:
+                            logger.warning(f"Error removing oldest container {oldest_container_id[:12]}: {str(e)}")
+
+                        # Remove timestamp for the removed container
+                        if oldest_container_id in self.container_creation_timestamps:
+                            del self.container_creation_timestamps[oldest_container_id]
+
+                        # Add the current container to the pool
+                        self.container_pool.append(container_id)
+                        self.container_creation_timestamps[container_id] = time.time()
+                        logger.debug(f"Added container {container_id[:12]} to pool, replacing oldest container")
+                    else:
+                        # No containers with timestamps found in the pool (shouldn't happen)
+                        container.remove(force=True)
+                        if container_id in self.container_creation_timestamps:
+                            del self.container_creation_timestamps[container_id]
+                        logger.debug(f"Pool is full but no containers with timestamps found, removed {container_id[:12]}")
             except Exception as e:
                 logger.warning(f"Error returning container {container_id[:12]} to pool: {str(e)}")
                 # Try to force remove if there's an issue
