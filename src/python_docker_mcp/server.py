@@ -291,7 +291,7 @@ async def main() -> None:
                 write_stream,
                 InitializationOptions(
                     server_name="python-docker-mcp",
-                    server_version="0.1.10",
+                    server_version="0.2.2",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
