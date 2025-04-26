@@ -844,38 +844,63 @@ exit $exit_code
             raise DockerExecutionError(f"Error installing package: {str(e)}")
 
     async def cleanup_session(self, session_id: str) -> Dict[str, Any]:
-        """Clean up a persistent session.
-
-        Args:
-            session_id: The session ID to clean up
-
-        Returns:
-            A dictionary indicating success or failure
-        """
-        # If Docker is not available, return a clear error
+        """Clean up a persistent session by stopping and removing its container."""
         if not self.docker_available:
-            return {"status": "error", "message": "Docker is not available. Please make sure Docker is running and restart the server."}
+            logger.warning(f"Docker not available, cannot clean up session {session_id}")
+            return {"status": "error", "message": "Docker not available"}
 
-        container_id = self.persistent_containers.get(session_id)
-        if not container_id:
-            return {"status": "not_found", "message": f"No session found with ID {session_id}"}
+        if session_id not in self.persistent_containers:
+            logger.warning(f"Session {session_id} not found for cleanup.")
+            return {"status": "skipped", "message": "Session not found"}
+
+        container_id = self.persistent_containers[session_id]
+        logger.info(f"Cleaning up session {session_id} (container {container_id[:12]})")
 
         try:
-            container = self.client.containers.get(container_id)
-            container.stop()
-            container.remove()
+            # Run blocking Docker calls in a separate thread
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            logger.debug(f"Stopping container {container_id[:12]}")
+            await asyncio.to_thread(container.stop, timeout=5)
+            logger.debug(f"Removing container {container_id[:12]}")
+            await asyncio.to_thread(container.remove, force=True)
+            logger.info(f"Session {session_id} (container {container_id[:12]}) cleaned up successfully.")
+
+            # Remove from persistent tracking (safe to do in main thread)
             del self.persistent_containers[session_id]
-            return {"status": "success", "message": f"Session {session_id} cleaned up successfully"}
+
+            return {"status": "success"}
+
         except NotFound:
-            # Container already gone, just remove the reference
+            logger.warning(f"Container {container_id[:12]} for session {session_id} not found during cleanup. Already removed?")
+            # Remove from persistent tracking if it still exists there
             if session_id in self.persistent_containers:
                 del self.persistent_containers[session_id]
-            return {"status": "not_found", "message": f"Session {session_id} not found, may have already been cleaned up"}
+            return {"status": "not_found"}
+
         except Exception as e:
-            return {"status": "error", "message": f"Error cleaning up session {session_id}: {str(e)}"}
+            # Check if the error is due to the container stop timing out - this might be expected during forceful shutdown
+            # Note: This depends on the specific exception type raised by docker-py on timeout, adjust if needed.
+            if "StopIteration" in str(e) or "Timeout" in str(e): # Heuristic check for timeout errors
+                logger.warning(f"Container {container_id[:12]} stop timed out during cleanup (session {session_id}). Proceeding with forced removal.")
+                # Attempt removal again, potentially redundant due to force=True, but explicit
+                try:
+                    container = await asyncio.to_thread(self.client.containers.get, container_id)
+                    await asyncio.to_thread(container.remove, force=True)
+                    logger.info(f"Force removed container {container_id[:12]} after stop timeout.")
+                except NotFound:
+                     logger.warning(f"Container {container_id[:12]} already gone after stop timeout.")
+                except Exception as remove_err:
+                     logger.error(f"Error force removing container {container_id[:12]} after stop timeout: {str(remove_err)}")
+            else:
+                logger.error(f"Error cleaning up session {session_id} (container {container_id[:12]}): {str(e)}")
+            
+            # Attempt to remove from tracking even if cleanup failed
+            if session_id in self.persistent_containers:
+                del self.persistent_containers[session_id]
+            return {"status": "error", "message": str(e)}
 
     async def _wait_for_container(self, container_id: str) -> int:
-        """Wait for a container to finish and return its exit code."""
+        """Wait for a container to finish execution and return its exit code."""
         client = docker.APIClient()
         poll_interval = 0.1  # 100ms between polls
         max_polls = int(self.config.docker.timeout / poll_interval)
