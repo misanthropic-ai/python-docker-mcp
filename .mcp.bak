@@ -1,0 +1,21 @@
+{
+    "mcpServers": {
+      "python-docker-mcp": {
+        "command": "uv",
+        "args": [
+          "run",
+          "python",
+          "-m",
+          "python_docker_mcp"
+        ],
+        "env": {
+          "PYTHON_DOCKER_MCP_POOL_ENABLED": "true",
+          "PYTHON_DOCKER_MCP_POOL_SIZE": "32",
+          "PYTHON_DOCKER_MCP_POOL_MAX_AGE": "300",
+          "PYTHON_DOCKER_MCP_MAX_CONCURRENT_CREATIONS": "5",
+          "PYTHON_DOCKER_MCP_MEMORY_LIMIT": "256m",
+          "PYTHON_DOCKER_MCP_CPU_LIMIT": "0.5"
+        }
+      }
+    }
+}

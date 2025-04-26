@@ -1,6 +1,6 @@
 [project]
 name = "python-docker-mcp"
-version = "0.2.2"
+version = "0.2.4"
 description = "Dockerised Python execution environment for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"

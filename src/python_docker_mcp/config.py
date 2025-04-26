@@ -167,4 +167,34 @@ def load_config(config_path: Optional[str] = None) -> Configuration:
         except Exception as e:
             print(f"Error loading configuration from {config_path}: {e}")
 
+    # Override configuration with environment variables if provided
+    # Docker pool settings
+    env = os.environ
+    if "PYTHON_DOCKER_MCP_POOL_ENABLED" in env:
+        val = env.get("PYTHON_DOCKER_MCP_POOL_ENABLED", "").lower()
+        default_config.docker.pool_enabled = val in ("1", "true", "yes")
+    if "PYTHON_DOCKER_MCP_POOL_SIZE" in env:
+        try:
+            default_config.docker.pool_size = int(env.get("PYTHON_DOCKER_MCP_POOL_SIZE", default_config.docker.pool_size))
+        except ValueError:
+            pass
+    if "PYTHON_DOCKER_MCP_POOL_MAX_AGE" in env:
+        try:
+            default_config.docker.pool_max_age = int(env.get("PYTHON_DOCKER_MCP_POOL_MAX_AGE", default_config.docker.pool_max_age))
+        except ValueError:
+            pass
+    if "PYTHON_DOCKER_MCP_MAX_CONCURRENT_CREATIONS" in env:
+        try:
+            default_config.docker.max_concurrent_creations = int(env.get("PYTHON_DOCKER_MCP_MAX_CONCURRENT_CREATIONS", default_config.docker.max_concurrent_creations))
+        except ValueError:
+            pass
+    # Resource limits
+    if "PYTHON_DOCKER_MCP_MEMORY_LIMIT" in env:
+        default_config.docker.memory_limit = env.get("PYTHON_DOCKER_MCP_MEMORY_LIMIT", default_config.docker.memory_limit)
+    if "PYTHON_DOCKER_MCP_CPU_LIMIT" in env:
+        try:
+            default_config.docker.cpu_limit = float(env.get("PYTHON_DOCKER_MCP_CPU_LIMIT", default_config.docker.cpu_limit))
+        except ValueError:
+            pass
+
     return default_config

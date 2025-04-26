@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("python-docker-mcp")
 
 # Package version - must match the version in pyproject.toml
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 
 def check_docker_image_exists(image_name: str) -> bool:

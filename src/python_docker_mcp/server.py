@@ -307,13 +307,54 @@ async def main() -> None:
     finally:
         # Clean up any remaining sessions when the server shuts down
         logger.info("Cleaning up sessions")
+        
+        cleanup_tasks = []
         for session_id in list(sessions.keys()):
-            try:
-                await docker_manager.cleanup_session(session_id)
-            except Exception as e:
-                logger.error(f"Error cleaning up session {session_id}: {e}")
+            logger.info(f"Scheduling cleanup for session {session_id}")
+            # Create a task for each cleanup operation
+            task = asyncio.create_task(
+                docker_manager.cleanup_session(session_id), 
+                name=f"cleanup-{session_id}"
+            )
+            cleanup_tasks.append(task)
 
-        logger.info("Server shutdown complete")
+        if cleanup_tasks:
+            # Run cleanup tasks concurrently with a timeout
+            done, pending = await asyncio.wait(
+                cleanup_tasks, 
+                timeout=10.0  # Adjust timeout as needed (e.g., 10 seconds)
+            )
+
+            # Log results and handle pending tasks
+            for task in done:
+                try:
+                    await task  # Raise exceptions if cleanup failed
+                    logger.info(f"Session cleanup completed for task {task.get_name()}")
+                except Exception as e:
+                    logger.error(f"Error during cleanup task {task.get_name()}: {e}")
+            
+            if pending:
+                logger.warning(f"{len(pending)} cleanup tasks did not complete within the timeout.")
+                # Optionally, attempt to cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task # Allow cancellation to propagate
+                    except asyncio.CancelledError:
+                        logger.info(f"Cancelled pending cleanup task {task.get_name()}")
+                    except Exception as e:
+                         logger.error(f"Error cancelling pending task {task.get_name()}: {e}")
+
+        # Clean up the sessions dictionary itself (optional, but good practice)
+        sessions.clear() 
+        
+        # Consider explicitly cleaning up the DockerManager's pool if needed
+        # try:
+        #    await docker_manager.shutdown_pool() # Assuming such a method exists
+        # except Exception as e:
+        #    logger.error(f"Error shutting down Docker pool: {e}")
+
+        logger.info("Server shutdown cleanup process finished.")
 
 
 # If this module is run directly, start the server
